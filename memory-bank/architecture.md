@@ -73,4 +73,13 @@ Pattern 结果同时保留旧兼容字段 `intent`/`confidence` 与后续融合�
 | `memory/conversation_memory.py` | 定义 `MsgRole`、`Message`、`MemoryContext`；实现消息 JSON 往返、Prompt 上下文截断，以及 `MemoryManager` 的 Redis `LPUSH`/`EXPIRE`/`LRANGE`/`LLEN` 工作记忆读写、时间顺序恢复和 15 条压缩入口信号。 |
 | `tests/test_memory_working.py` | 使用内存 Fake Redis 验证消息序列化、key 命名、TTL、逆序恢复、压缩阈值、Prompt 截断和 Redis 异常安全路径。 |
 
-当前只完成短期 Redis 工作记忆；摘要压缩、`episodic` Chroma 写入和用户画像异步更新必须在后续 Step 3.2/3.3 单独实现。
+Step 3.1 的短期 Redis 工作记忆已完成；用户画像异步更新仍由 Step 3.3 单独实现。
+
+## Step 3.2：会话摘要与 Chroma 情景记忆
+
+| 文件 | 职责 |
+| --- | --- |
+| `memory/conversation_memory.py` | 在 Redis 工作记忆之上实现 15 条阈值触发的 `messages[:-5]` 摘要压缩、固定参数 Anthropic 摘要调用、800 字符摘要上限、摘要 Redis TTL 写回和最新 5 条热记忆重建；通过 `asyncio.to_thread` 写入固定 `episodic` Chroma 集合，并按当前会话优先、同用户补足的顺序检索最多 5 条历史。 |
+| `tests/test_memory_episodic.py` | 使用内存 Fake Redis、LLM 和 Chroma collection 验证摘要输入切分、固定降级文案、Redis 状态重置、Chroma 元数据与 500 字符 `full_text` 限制、两级召回优先级、`to_thread` 和异常隔离。 |
+
+Step 3.2 仍不包含用户画像集合、画像异步后台写回或 Step 3.3 的 profile 更新任务。

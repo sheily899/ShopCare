@@ -88,3 +88,16 @@
 - 测试：新增 `tests/test_memory_working.py`，覆盖序列化、key、LPUSH/EXPIRE、顺序恢复、15 条阈值、Prompt 截断和 Redis 异常。
 - 验证：`.venv\Scripts\python.exe -m pytest -q` → `68 passed`；`compileall` 与 `git diff --check` 通过。
 - 边界：尚未实现摘要 LLM、Chroma 情景记忆、用户画像和后台异步画像更新；Step 3.2 未开始。
+
+## Step 3.2：会话摘要与 Chroma 情景记忆
+
+- 状态：已完成，等待人工确认后再进入 Step 3.3。
+- 修改：`memory/conversation_memory.py` 增加工作记忆压缩、摘要生成、`episodic` Chroma 写入和两级情景记忆检索。
+- 压缩：达到 `LLEN >= 15` 后读取最多 20 条，按 `messages[:-5]` / `messages[-5:]` 切分；摘要调用固定 `temperature=0`、`max_tokens=256`，并限制为 800 字符。
+- 降级：摘要 LLM 异常统一使用 `对话包含 {N} 条消息（摘要生成失败）`；Redis 写回失败和 Chroma 连接/检索失败均记录日志并隔离，不伪造情景上下文。
+- Redis：摘要写入 `summary:{user_id}:{conv_id}` 并使用 86400 秒 TTL；工作记忆列表删除后按时间顺序重建最新 5 条。
+- Chroma：固定 `episodic` 集合；写入 `user_id`、`conv_id`、`ts`、最多 500 字符的 `full_text`；同步 Chroma 操作统一通过 `asyncio.to_thread`。
+- 检索：先按用户+会话召回，再按用户补足，内存去重后最多返回 5 条。
+- 测试：新增 `tests/test_memory_episodic.py`，覆盖 15/5 滑窗、摘要截断与失败兜底、Chroma 元数据/截断、两级优先级检索、`to_thread` 和异常隔离。
+- 验证：`.venv\Scripts\python.exe -m pytest -q tests/test_memory_episodic.py` → `5 passed`；全量 `.venv\Scripts\python.exe -m pytest -q` → `73 passed`；`compileall` 与 `git diff --check` 通过。
+- 边界：未实现用户画像异步写回、`asyncio.create_task(update_profile)` 和 Step 3.3 逻辑。
