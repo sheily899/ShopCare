@@ -46,3 +46,13 @@ Pattern 结果同时保留旧兼容字段 `intent`/`confidence` 与后续融合�
 | `tests/test_intent_llm_tool.py` | 使用 `AsyncMock` 验证 Tool Use 成功解析、工具名与 `tool_choice`、18 类枚举、`additionalProperties=False`、非法意图、缺失/额外字段、越界置信度、无 tool_use 和超时异常。 |
 
 `LLMIntentResult` 保持内部 dataclass 边界，并提供属性访问及兼容的 `result["field"]` / `result.get(...)` 读取方式；本阶段不执行 Embedding、Pattern 加权融合或任何真实公网请求。
+
+## Step 2.3：Embedding 与三路加权融合
+
+| 文件 | 职责 |
+| --- | --- |
+| `core/intent_recognizer.py` | 增加 `EmbeddingIntentResult`、18 类意图模板、固定 256 维 MD5 1/2/3-gram 向量、余弦相似度和可选远程 Embedding 适配；实现 `recognize_intent` 的 LLM/Embedding/Pattern 并发、0.7/0.2/0.1 与 0.85/0.15 权重、0.5/0.45/0.8 阈值、500 覆盖、实体/紧急度/延迟装配及诊断记录。 |
+| `tests/test_intent_fusion.py` | 验证三路正常融合、Embedding 失败权重切换、0.5 硬拦截、LLM 失败时 0.45 fallback、Pattern 细化和 500 终极覆盖。 |
+| `tests/test_intent_diagnostics.py` | 验证本地向量为固定 256 维、相似度范围、local fallback 标志以及 source/final diagnostics 完整性。 |
+
+本阶段没有实现复合意图拆分；`secondary_intents` 与 `compound_trigger` 保持契约默认值，等待 Step 2.4。

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
+import hashlib
+import inspect
 import logging
 import math
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -54,6 +58,7 @@ class IntentResult:
     source_intents: Dict[str, str] = field(default_factory=dict)
     secondary_intents: List[IntentCategory] = field(default_factory=list)
     compound_trigger: str = ""
+    intent_diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -68,6 +73,28 @@ class LLMIntentResult:
 
     def __getitem__(self, key: str) -> Any:
         """Keep dict-style access convenient for the later fusion adapter."""
+        return getattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+
+@dataclass
+class EmbeddingIntentResult:
+    """Internal result contract for the embedding intent source."""
+
+    intent: IntentCategory
+    score: float
+    success: bool = True
+    local_fallback: bool = False
+    reasoning: str = ""
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def confidence(self) -> float:
+        return self.score
+
+    def __getitem__(self, key: str) -> Any:
         return getattr(self, key)
 
     def get(self, key: str, default: Any = None) -> Any:
@@ -247,6 +274,174 @@ async def _recognize_with_llm(
     except Exception as exc:
         logger.warning("LLM 意图识别失败: %s", exc)
         return _failed_llm_result(str(exc))
+
+
+HASH_EMBEDDING_DIM = 256
+EMBEDDING_MODEL = "voyage-3-lite"
+EMBEDDING_TEMPLATES: Dict[IntentCategory, Tuple[str, ...]] = {
+    IntentCategory.QUERY: ("我的订单状态是什么？", "如何重置密码？", "快递什么时候到？"),
+    IntentCategory.COMPLAINT: ("等了好几个小时！", "服务太差了！", "一直没人处理！"),
+    IntentCategory.REQUEST: ("帮我取消订单", "我需要修改地址", "请协助退款"),
+    IntentCategory.GREETING: ("你好", "嗨，有人吗", "早上好"),
+    IntentCategory.TECHNICAL: ("应用一直崩溃", "无法登录", "出现500错误"),
+    IntentCategory.BILLING: ("为什么扣了两次款？", "申请退款", "发票问题"),
+    IntentCategory.ACCOUNT: ("修改邮箱", "注销账户", "更新个人信息"),
+    IntentCategory.FEEDBACK: ("服务很棒！", "非常满意", "给个好评"),
+    IntentCategory.ORDER_STATUS: (
+        "我的订单现在是什么状态？",
+        "订单有没有发货？",
+        "订单处理到哪一步了？",
+    ),
+    IntentCategory.LOGISTICS: ("快递什么时候到？", "物流一直不更新", "配送要多久？"),
+    IntentCategory.REFUND: ("我要申请退款", "退货退款怎么处理？", "退款多久到账？"),
+    IntentCategory.INVOICE: ("帮我开发票", "发票抬头怎么改？", "电子发票在哪里？"),
+    IntentCategory.PAYMENT_ISSUE: (
+        "为什么重复扣款？",
+        "支付失败怎么办？",
+        "这个月多扣了钱",
+    ),
+    IntentCategory.ACCOUNT_SECURITY: ("账户被盗了", "发现异常登录", "我要重置密码"),
+    IntentCategory.TECHNICAL_LOGIN: ("登录一直报401", "验证码收不到", "无法登录账号"),
+    IntentCategory.TECHNICAL_CRASH: ("应用一直崩溃", "页面报500错误", "系统闪退"),
+    IntentCategory.HUMAN_HANDOFF: ("转人工客服", "我要找人工", "请升级处理"),
+    IntentCategory.OTHER: ("其他问题", "不清楚", "不知道"),
+}
+
+
+def _hash_ngram_vector(text: str) -> List[float]:
+    """Build the fixed 256-dimension local 1/2/3-gram MD5 vector."""
+    normalized = (text or "").casefold().strip()
+    vector = [0.0] * HASH_EMBEDDING_DIM
+    tokens = set()
+    for ngram_size in (1, 2, 3):
+        if len(normalized) >= ngram_size:
+            tokens.update(
+                normalized[index : index + ngram_size]
+                for index in range(len(normalized) - ngram_size + 1)
+            )
+    if not tokens:
+        tokens.add(normalized)
+    for token in tokens:
+        digest = hashlib.md5(token.encode("utf-8")).digest()
+        bucket = int.from_bytes(digest[:4], "big") % HASH_EMBEDDING_DIM
+        vector[bucket] += 1.0 if digest[4] % 2 == 0 else -1.0
+    return vector
+
+
+def _cosine_similarity(left: List[float], right: List[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    denominator = math.sqrt(sum(value * value for value in left)) * math.sqrt(
+        sum(value * value for value in right)
+    )
+    if denominator == 0.0:
+        return 0.0
+    score = sum(a * b for a, b in zip(left, right)) / denominator
+    return min(1.0, max(0.0, float(score)))
+
+
+def _parse_remote_embeddings(payload: Any) -> Optional[List[List[float]]]:
+    if hasattr(payload, "json") and callable(payload.json):
+        payload = payload.json()
+    if isinstance(payload, dict):
+        payload = payload.get("data", payload.get("embeddings", payload.get("embedding")))
+    if isinstance(payload, dict):
+        payload = [payload]
+    if not isinstance(payload, list):
+        return None
+    if payload and isinstance(payload[0], dict):
+        payload = [item.get("embedding") for item in payload]
+    if not all(isinstance(vector, list) for vector in payload):
+        return None
+    try:
+        return [[float(value) for value in vector] for vector in payload]
+    except (TypeError, ValueError):
+        return None
+
+
+async def _fetch_remote_embeddings(
+    texts: List[str],
+    remote_client: Any = None,
+) -> Optional[List[List[float]]]:
+    """Try an optional compatible embedding endpoint; callers always have local fallback."""
+    url = os.getenv("EMBEDDING_API_URL", "").strip()
+    if not url:
+        return None
+    payload = {"model": os.getenv("EMBEDDING_MODEL", EMBEDDING_MODEL), "input": texts}
+    headers = {}
+    api_key = os.getenv("EMBEDDING_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        if remote_client is not None:
+            if callable(remote_client):
+                response = remote_client(texts)
+            else:
+                response = remote_client.post(
+                    url, json=payload, headers=headers, timeout=5.0
+                )
+            if inspect.isawaitable(response):
+                response = await response
+            if hasattr(response, "raise_for_status"):
+                response.raise_for_status()
+            return _parse_remote_embeddings(response)
+
+        try:
+            import httpx
+        except Exception:
+            return None
+        async with httpx.AsyncClient(timeout=5.0) as http_client:
+            response = await http_client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            return _parse_remote_embeddings(response)
+    except Exception as exc:
+        logger.warning("远程 Embedding 失败，使用本地哈希向量: %s", exc)
+        return None
+
+
+async def _recognize_with_embedding(
+    message: str,
+    remote_client: Any = None,
+) -> EmbeddingIntentResult:
+    """Return the best template match, preferring remote vectors and degrading locally."""
+    template_items = list(EMBEDDING_TEMPLATES.items())
+    flattened_templates = [
+        (intent, text)
+        for intent, texts in template_items
+        for text in texts
+    ]
+    template_texts = [text for _, text in flattened_templates]
+    all_texts = template_texts + [message or ""]
+    remote_vectors = await _fetch_remote_embeddings(all_texts, remote_client)
+    local_fallback = not remote_vectors or len(remote_vectors) != len(all_texts)
+    vectors = (
+        [_hash_ngram_vector(text) for text in all_texts]
+        if local_fallback
+        else remote_vectors
+    )
+
+    query_vector = vectors[-1]
+    template_scores = [
+        _cosine_similarity(template_vector, query_vector)
+        for template_vector in vectors[:-1]
+    ]
+    intent_scores: Dict[IntentCategory, float] = {}
+    for (intent, _), score in zip(flattened_templates, template_scores):
+        intent_scores[intent] = max(score, intent_scores.get(intent, 0.0))
+    if not intent_scores or max(intent_scores.values()) <= 0.0:
+        best_intent = IntentCategory.OTHER
+        best_score = 0.0
+    else:
+        best_intent, best_score = max(intent_scores.items(), key=lambda item: item[1])
+    return EmbeddingIntentResult(
+        intent=best_intent,
+        score=min(1.0, max(0.0, float(best_score))),
+        success=True,
+        local_fallback=local_fallback,
+        reasoning="本地 1/2/3-gram MD5 向量" if local_fallback else "远程 Embedding 向量",
+        diagnostics={"embedding_model": os.getenv("EMBEDDING_MODEL", EMBEDDING_MODEL)},
+    )
 
 
 # Specific patterns take precedence over generic domain labels when scores tie.
@@ -548,3 +743,258 @@ def apply_500_override(
 
 
 apply_status_code_override = apply_500_override
+
+
+_INTENT_GROUPS: Dict[IntentCategory, str] = {
+    IntentCategory.ORDER_STATUS: "query",
+    IntentCategory.LOGISTICS: "query",
+    IntentCategory.REFUND: "billing",
+    IntentCategory.INVOICE: "billing",
+    IntentCategory.PAYMENT_ISSUE: "billing",
+    IntentCategory.ACCOUNT_SECURITY: "account",
+    IntentCategory.TECHNICAL_LOGIN: "technical",
+    IntentCategory.TECHNICAL_CRASH: "technical",
+}
+
+
+def _coerce_intent(value: Any) -> IntentCategory:
+    if isinstance(value, IntentCategory):
+        return value
+    try:
+        return IntentCategory(str(value))
+    except (TypeError, ValueError):
+        return IntentCategory.OTHER
+
+
+def _bounded_score(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        return 0.0
+    return min(1.0, max(0.0, numeric))
+
+
+def _normalize_llm_source(value: Any) -> LLMIntentResult:
+    if isinstance(value, LLMIntentResult):
+        return value
+    if isinstance(value, dict):
+        intent = _coerce_intent(value.get("intent"))
+        failed = bool(value.get("failed", False))
+        success = bool(value.get("success", not failed))
+        return LLMIntentResult(
+            intent=intent,
+            confidence=_bounded_score(value.get("confidence", 0.0)),
+            reasoning=str(value.get("reasoning", "")),
+            success=success,
+            diagnostics=dict(value.get("diagnostics", {})),
+        )
+    return _failed_llm_result("LLM 来源未返回结构化结果")
+
+
+def _normalize_embedding_source(value: Any) -> EmbeddingIntentResult:
+    if isinstance(value, EmbeddingIntentResult):
+        return value
+    if isinstance(value, dict):
+        intent = _coerce_intent(value.get("intent"))
+        score = _bounded_score(value.get("score", value.get("confidence", 0.0)))
+        explicit_success = value.get("success")
+        success = (
+            bool(explicit_success)
+            if explicit_success is not None
+            else bool(not value.get("failed", False) and (intent is not IntentCategory.OTHER or score > 0.0))
+        )
+        return EmbeddingIntentResult(
+            intent=intent,
+            score=score,
+            success=success,
+            local_fallback=bool(value.get("local_fallback", False)),
+            reasoning=str(value.get("reasoning", "")),
+            diagnostics=dict(value.get("diagnostics", {})),
+        )
+    return EmbeddingIntentResult(
+        intent=IntentCategory.OTHER,
+        score=0.0,
+        success=False,
+        local_fallback=False,
+        reasoning="Embedding 来源未返回结构化结果",
+    )
+
+
+def _pattern_score_map(pattern_result: Dict[str, Any]) -> Dict[IntentCategory, float]:
+    scores: Dict[IntentCategory, float] = {}
+    for raw_intent, raw_score in dict(pattern_result.get("scores", {})).items():
+        intent = _coerce_intent(raw_intent)
+        score = _bounded_score(raw_score)
+        if score > scores.get(intent, 0.0):
+            scores[intent] = score
+    best_intent = _coerce_intent(pattern_result.get("intent"))
+    best_score = _bounded_score(pattern_result.get("confidence", 0.0))
+    if best_intent not in scores and best_score > 0.0:
+        scores[best_intent] = best_score
+    return scores
+
+
+def _intent_group(intent: IntentCategory) -> str:
+    return _INTENT_GROUPS.get(intent, intent.value)
+
+
+async def recognize_intent(
+    message: str,
+    history: Optional[List[Any]] = None,
+) -> IntentResult:
+    """Run LLM, embedding and pattern sources, then apply the fixed fusion state machine."""
+    started_at = time.perf_counter()
+    llm_task = asyncio.create_task(_recognize_with_llm(message, history))
+    embedding_task = asyncio.create_task(_recognize_with_embedding(message))
+    try:
+        pattern_result = _pattern_recognize(message)
+    except Exception as exc:
+        logger.warning("Pattern 识别失败: %s", exc)
+        pattern_result = {
+            "intent": IntentCategory.OTHER,
+            "confidence": 0.0,
+            "scores": {},
+            "specific_intent": IntentCategory.OTHER,
+            "specific_score": 0.0,
+        }
+
+    llm_raw, embedding_raw = await asyncio.gather(
+        llm_task,
+        embedding_task,
+        return_exceptions=True,
+    )
+    llm = (
+        _failed_llm_result(f"来源异常: {llm_raw}")
+        if isinstance(llm_raw, Exception)
+        else _normalize_llm_source(llm_raw)
+    )
+    embedding = (
+        EmbeddingIntentResult(
+            intent=IntentCategory.OTHER,
+            score=0.0,
+            success=False,
+            reasoning=f"来源异常: {embedding_raw}",
+        )
+        if isinstance(embedding_raw, Exception)
+        else _normalize_embedding_source(embedding_raw)
+    )
+    pattern_intent = _coerce_intent(pattern_result.get("intent"))
+    pattern_confidence = _bounded_score(pattern_result.get("confidence", 0.0))
+    pattern_scores = _pattern_score_map(pattern_result)
+    specific_intent = _coerce_intent(pattern_result.get("specific_intent"))
+    specific_score = _bounded_score(pattern_result.get("specific_score", 0.0))
+
+    source_intents = {
+        "llm": llm.intent.value,
+        "embedding": embedding.intent.value,
+        "pattern": pattern_intent.value,
+    }
+    source_scores = {
+        "llm": _bounded_score(llm.confidence),
+        "embedding": _bounded_score(embedding.score),
+        "pattern": pattern_confidence,
+    }
+    diagnostics: Dict[str, Any] = {
+        "llm_success": llm.success,
+        "embedding_success": embedding.success,
+        "embedding_local_fallback": embedding.local_fallback,
+        "pattern_specific_score": specific_score,
+        "source_intents": dict(source_intents),
+        "source_scores": dict(source_scores),
+        "source_failures": {
+            "llm": not llm.success,
+            "embedding": not embedding.success,
+        },
+        "weights": {
+            "llm": 0.0,
+            "embedding": 1.0 if embedding.success else 0.0,
+            "pattern": 0.0,
+        },
+        "fallback": "",
+    }
+
+    final_intent = IntentCategory.OTHER
+    final_confidence = 0.0
+    if not llm.success:
+        if specific_score > 0.0 and specific_intent is not IntentCategory.OTHER:
+            final_intent = specific_intent
+            final_confidence = specific_score
+            diagnostics["fallback"] = "specific_pattern"
+        elif embedding.success and embedding.score >= 0.45:
+            final_intent = embedding.intent
+            final_confidence = embedding.score
+            diagnostics["fallback"] = "embedding"
+        else:
+            diagnostics["fallback"] = "llm_and_embedding_unavailable"
+    else:
+        if embedding.success:
+            weights = {"llm": 0.7, "embedding": 0.2, "pattern": 0.1}
+        else:
+            weights = {"llm": 0.85, "embedding": 0.0, "pattern": 0.15}
+        diagnostics["weights"] = weights
+        fused_scores: Dict[IntentCategory, float] = {}
+        fused_scores[llm.intent] = fused_scores.get(llm.intent, 0.0) + (
+            weights["llm"] * llm.confidence
+        )
+        if embedding.success:
+            fused_scores[embedding.intent] = fused_scores.get(embedding.intent, 0.0) + (
+                weights["embedding"] * embedding.score
+            )
+        for intent, score in pattern_scores.items():
+            fused_scores[intent] = fused_scores.get(intent, 0.0) + (
+                weights["pattern"] * score
+            )
+
+        candidate, fused_confidence = max(
+            fused_scores.items(), key=lambda item: item[1], default=(IntentCategory.OTHER, 0.0)
+        )
+        if fused_confidence < 0.5:
+            diagnostics["fallback"] = "low_fused_score"
+        else:
+            final_intent = candidate
+            final_confidence = fused_confidence
+            if (
+                candidate in _GENERIC_INTENTS
+                and specific_intent is not IntentCategory.OTHER
+                and specific_intent is not candidate
+                and specific_score >= 0.5
+                and fused_confidence < 0.8
+            ):
+                final_intent = specific_intent
+                final_confidence = max(fused_confidence, specific_score)
+                diagnostics["refined_from"] = candidate.value
+
+    final_intent, final_confidence = apply_500_override(
+        message,
+        final_intent,
+        final_confidence,
+    )
+    diagnostics["status_code_override"] = final_intent is IntentCategory.TECHNICAL_CRASH and "500" in (message or "")
+    diagnostics["final_intent"] = final_intent.value
+    normalized_confidence = _bounded_score(round(final_confidence, 6))
+    diagnostics["final_confidence"] = normalized_confidence
+
+    if llm.success and llm.reasoning:
+        reasoning = llm.reasoning
+    elif diagnostics["fallback"] == "embedding":
+        reasoning = "LLM 失败，采用 Embedding 结果"
+    elif diagnostics["fallback"] == "specific_pattern":
+        reasoning = "LLM 失败，采用特异 Pattern 结果"
+    elif final_intent is IntentCategory.OTHER:
+        reasoning = "未达到意图识别阈值"
+    else:
+        reasoning = "采用融合后的意图结果"
+
+    return IntentResult(
+        intent=final_intent,
+        confidence=normalized_confidence,
+        urgency=calculate_urgency(message, final_intent),
+        intent_group=_intent_group(final_intent),
+        entities=extract_entities(message),
+        reasoning=reasoning,
+        latency_ms=max(0.0, round((time.perf_counter() - started_at) * 1000, 3)),
+        source_scores=source_scores,
+        source_intents=source_intents,
+        intent_diagnostics=diagnostics,
+    )
