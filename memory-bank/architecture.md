@@ -37,3 +37,12 @@ Step 1.1 未创建 API 模型、内部 dataclass、业务路由或外部业务�
 | `tests/test_intent_patterns.py` | 覆盖 Pattern 表完整性、0.5/0.75/1.0 计分、退款/物流/投诉/人工、实体字段、紧急度优先级、意图兜底和 500 特例。 |
 
 Pattern 结果同时保留旧兼容字段 `intent`/`confidence` 与后续融合所需的 `candidates`、`scores`、`hits`、`specific_score`；本阶段不发起网络、LLM、Embedding 或存储调用。
+
+## Step 2.2：LLM Tool Use 意图识别适配器
+
+| 文件 | 职责 |
+| --- | --- |
+| `core/intent_recognizer.py` | 增加 `CLASSIFY_INTENT_TOOL` 严格 JSON Schema、内部 `LLMIntentResult` dataclass、历史上下文提示构造、Anthropic `messages.create` 异步 Tool Use 调用、`tool_use` payload 校验和统一失败降级。客户端采用依赖注入；未传 client 时才惰性创建 SDK 客户端。 |
+| `tests/test_intent_llm_tool.py` | 使用 `AsyncMock` 验证 Tool Use 成功解析、工具名与 `tool_choice`、18 类枚举、`additionalProperties=False`、非法意图、缺失/额外字段、越界置信度、无 tool_use 和超时异常。 |
+
+`LLMIntentResult` 保持内部 dataclass 边界，并提供属性访问及兼容的 `result["field"]` / `result.get(...)` 读取方式；本阶段不执行 Embedding、Pattern 加权融合或任何真实公网请求。

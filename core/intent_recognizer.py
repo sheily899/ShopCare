@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
+import logging
+import math
+import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
+
+
+logger = logging.getLogger(__name__)
 
 
 class IntentCategory(str, Enum):
@@ -48,6 +54,199 @@ class IntentResult:
     source_intents: Dict[str, str] = field(default_factory=dict)
     secondary_intents: List[IntentCategory] = field(default_factory=list)
     compound_trigger: str = ""
+
+
+@dataclass
+class LLMIntentResult:
+    """Internal result contract for the isolated LLM intent source."""
+
+    intent: IntentCategory
+    confidence: float
+    reasoning: str
+    success: bool
+    diagnostics: Dict[str, Any] = field(default_factory=dict)
+
+    def __getitem__(self, key: str) -> Any:
+        """Keep dict-style access convenient for the later fusion adapter."""
+        return getattr(self, key)
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+
+_INTENT_TOOL_NAME = "classify_intent"
+CLASSIFY_INTENT_TOOL: Dict[str, Any] = {
+    "name": _INTENT_TOOL_NAME,
+    "description": "用于对电商客户会话进行精准意图分类，并返回判定理由与置信度。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "intent": {
+                "type": "string",
+                "enum": [category.value for category in IntentCategory],
+            },
+            "confidence": {
+                "type": "number",
+                "description": "模型对意图分类结果的置信度，范围为 0 到 1。",
+            },
+            "reasoning": {
+                "type": "string",
+                "description": "简要陈述判定该意图的理由。",
+            },
+        },
+        "required": ["intent", "confidence", "reasoning"],
+        "additionalProperties": False,
+    },
+}
+
+# Keep the source-oriented name available for the later fusion implementation.
+_INTENT_TOOL = CLASSIFY_INTENT_TOOL
+DEFAULT_LLM_MODEL = "claude-3-5-sonnet-20241022"
+_LLM_SYSTEM_PROMPT = """你是 ShopCare 的电商客服意图分析器。
+请根据用户当前消息和可选的最近会话上下文，选择最具体的一个意图。
+必须调用 classify_intent 工具，不要输出自由文本 JSON。
+intent 必须使用工具 schema 中的枚举值，confidence 必须是数字，reasoning 说明最直接的判定依据。
+退款、发票、登录故障、崩溃、物流和人工请求优先使用对应的细粒度意图，不要用宽泛类别替代。"""
+
+
+def _build_llm_user_message(
+    message: str,
+    history: Optional[List[Any]],
+) -> str:
+    """Build the user-side prompt while keeping history optional and bounded."""
+    current = message or ""
+    if not history:
+        return current
+
+    history_lines: List[str] = []
+    for item in history[-3:]:
+        if isinstance(item, dict):
+            role = str(item.get("role", "user"))
+            content = str(item.get("content", ""))
+        else:
+            role = str(getattr(item, "role", "user"))
+            content = str(getattr(item, "content", ""))
+        if content.strip():
+            history_lines.append(f"{role}: {content.strip()}")
+    if not history_lines:
+        return current
+    return f"最近会话：\n{chr(10).join(history_lines)}\n\n当前用户消息：\n{current}"
+
+
+def _extract_intent_tool_input(content: Any) -> Optional[Dict[str, Any]]:
+    """Extract the strict classify_intent tool payload from an Anthropic response."""
+    for block in content or []:
+        block_type = getattr(block, "type", None)
+        name = getattr(block, "name", None)
+        input_data = getattr(block, "input", None)
+        if isinstance(block, dict):
+            block_type = block.get("type", block_type)
+            name = block.get("name", name)
+            input_data = block.get("input", input_data)
+        if (
+            block_type == "tool_use"
+            and name == _INTENT_TOOL_NAME
+            and isinstance(input_data, dict)
+        ):
+            return input_data
+    return None
+
+
+def _failed_llm_result(reason: str) -> LLMIntentResult:
+    return LLMIntentResult(
+        intent=IntentCategory.OTHER,
+        confidence=0.0,
+        reasoning=f"LLM 失败: {reason}",
+        success=False,
+        diagnostics={"llm_failed": True, "error": reason},
+    )
+
+
+def _get_default_anthropic_client() -> Any:
+    """Create the SDK client lazily so pure pattern tests need no SDK import."""
+    try:
+        from anthropic import AsyncAnthropic
+    except Exception as exc:  # pragma: no cover - depends on optional local install
+        raise RuntimeError(f"Anthropic SDK 不可用: {exc}") from exc
+    return AsyncAnthropic()
+
+
+async def _recognize_with_llm(
+    message: str,
+    history: Optional[List[Any]] = None,
+    client: Any = None,
+    model: Optional[str] = None,
+) -> LLMIntentResult:
+    """Classify one message through Anthropic Tool Use with safe fallback semantics."""
+    try:
+        if not isinstance(message, str) or not message.strip():
+            raise ValueError("待分析消息不能为空")
+
+        anthropic_client = client or _get_default_anthropic_client()
+        selected_model = model or os.getenv("ANTHROPIC_MODEL", DEFAULT_LLM_MODEL)
+        response = await anthropic_client.messages.create(
+            model=selected_model,
+            max_tokens=256,
+            temperature=0.1,
+            system=_LLM_SYSTEM_PROMPT,
+            tools=[CLASSIFY_INTENT_TOOL],
+            tool_choice={"type": "tool", "name": _INTENT_TOOL_NAME},
+            messages=[
+                {
+                    "role": "user",
+                    "content": _build_llm_user_message(message, history),
+                }
+            ],
+        )
+
+        payload = _extract_intent_tool_input(getattr(response, "content", None))
+        if payload is None:
+            raise ValueError(f"未收到有效的 {_INTENT_TOOL_NAME} 工具调用")
+
+        expected_fields = {"intent", "confidence", "reasoning"}
+        payload_fields = set(payload)
+        missing = expected_fields - payload_fields
+        extra = payload_fields - expected_fields
+        if missing:
+            raise ValueError(f"工具返回缺少必填字段: {sorted(missing)}")
+        if extra:
+            raise ValueError(f"工具返回包含未定义字段: {sorted(extra)}")
+
+        raw_intent = payload["intent"]
+        if not isinstance(raw_intent, str):
+            raise ValueError("工具返回的 intent 不是字符串")
+        try:
+            intent = IntentCategory(raw_intent)
+        except ValueError as exc:
+            raise ValueError(f"工具返回了未注册的 intent: {raw_intent!r}") from exc
+
+        raw_confidence = payload["confidence"]
+        if isinstance(raw_confidence, bool) or not isinstance(
+            raw_confidence, (int, float)
+        ):
+            raise ValueError("工具返回的 confidence 不是数字")
+        numeric_confidence = float(raw_confidence)
+        if not math.isfinite(numeric_confidence):
+            raise ValueError("工具返回的 confidence 不是有限数字")
+        confidence = min(1.0, max(0.0, numeric_confidence))
+
+        reasoning = payload["reasoning"]
+        if not isinstance(reasoning, str) or not reasoning.strip():
+            raise ValueError("工具返回的 reasoning 为空或不是字符串")
+
+        diagnostics: Dict[str, Any] = {}
+        if confidence != numeric_confidence:
+            diagnostics["confidence_clamped"] = True
+        return LLMIntentResult(
+            intent=intent,
+            confidence=confidence,
+            reasoning=reasoning.strip(),
+            success=True,
+            diagnostics=diagnostics,
+        )
+    except Exception as exc:
+        logger.warning("LLM 意图识别失败: %s", exc)
+        return _failed_llm_result(str(exc))
 
 
 # Specific patterns take precedence over generic domain labels when scores tie.
