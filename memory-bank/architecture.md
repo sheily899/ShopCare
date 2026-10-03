@@ -28,3 +28,12 @@ Step 1.1 未创建 API 模型、内部 dataclass、业务路由或外部业务�
 | `tests/test_internal_contracts.py` | 校验枚举值/别名、UrgencyLevel 数值、dataclass 默认值、UUID 请求号、可变集合隔离和非 Pydantic 边界。 |
 
 内部模块仅依赖 Python 标准库和彼此的类型枚举；Pydantic 仍只存在于 API 边界模块。
+
+## Step 2.1：Pattern 规则、实体抽取与紧急度判定
+
+| 文件 | 职责 |
+| --- | --- |
+| `core/intent_recognizer.py` | 在既有枚举/结果契约之上增加 18 类 Specific/Generic 正则规则、命中计分、五键实体抽取、固定紧急度优先级和 500 状态码覆盖辅助函数。所有逻辑均为标准库纯函数。 |
+| `tests/test_intent_patterns.py` | 覆盖 Pattern 表完整性、0.5/0.75/1.0 计分、退款/物流/投诉/人工、实体字段、紧急度优先级、意图兜底和 500 特例。 |
+
+Pattern 结果同时保留旧兼容字段 `intent`/`confidence` 与后续融合所需的 `candidates`、`scores`、`hits`、`specific_score`；本阶段不发起网络、LLM、Embedding 或存储调用。
