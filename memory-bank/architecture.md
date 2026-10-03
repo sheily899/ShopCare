@@ -65,3 +65,12 @@ Pattern 结果同时保留旧兼容字段 `intent`/`confidence` 与后续融合�
 | `tests/test_compound_intent.py` | 验证无分割信号时的单意图守门、技术+账单跨域识别、同域过滤、次意图 3 个上限、人工终止规则及 `recognize_intent` 字段装配。 |
 
 本阶段仍不执行 Agent fan-out 或知识库检索；scoped query 只是识别层输出，后续编排器必须只消费已确认的 `secondary_intents`，不能重新通过关键词猜测辅助 Agent。
+
+## Step 3.1：Message 与 Redis 工作记忆
+
+| 文件 | 职责 |
+| --- | --- |
+| `memory/conversation_memory.py` | 定义 `MsgRole`、`Message`、`MemoryContext`；实现消息 JSON 往返、Prompt 上下文截断，以及 `MemoryManager` 的 Redis `LPUSH`/`EXPIRE`/`LRANGE`/`LLEN` 工作记忆读写、时间顺序恢复和 15 条压缩入口信号。 |
+| `tests/test_memory_working.py` | 使用内存 Fake Redis 验证消息序列化、key 命名、TTL、逆序恢复、压缩阈值、Prompt 截断和 Redis 异常安全路径。 |
+
+当前只完成短期 Redis 工作记忆；摘要压缩、`episodic` Chroma 写入和用户画像异步更新必须在后续 Step 3.2/3.3 单独实现。

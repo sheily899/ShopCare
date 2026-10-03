@@ -76,3 +76,15 @@
 - [x] 0.5、0.45、0.8 阈值和 500 覆盖通过。
 - [x] 复合意图最多 3 个且不会因单纯关键词共现触发跨域并发。
 - [x] 更新 progress.md 与 architecture.md。
+
+## Step 3.1：Message 与 Redis 工作记忆
+
+- 状态：已完成，等待确认后再进入 Step 3.2。
+- 创建：`memory/conversation_memory.py` 实现 `MsgRole`、`Message`、`MemoryContext` 和 `MemoryManager` 的 Redis 工作记忆读写。
+- 数据结构：`Message` 支持 timestamp/metadata 的 JSON 字典往返；`MemoryContext.to_prompt_text()` 保留 summary、最多 3 条 relevant history 和最后 8 条 recent messages。
+- Redis 规则：key 为 `wm:{user_id}:{conv_id}`；消息使用 `LPUSH` 写入、随后 `EXPIRE 86400`；读取最多 20 条并反转恢复时间正序。
+- 压缩边界：达到 15 条只设置压缩入口信号并记录日志，保留 5 条常量；摘要生成、旧消息压缩与 Chroma episodic 写入留给 Step 3.2。
+- 异常：Redis 读写失败记录 error 日志并返回安全结果，不伪造上下文。
+- 测试：新增 `tests/test_memory_working.py`，覆盖序列化、key、LPUSH/EXPIRE、顺序恢复、15 条阈值、Prompt 截断和 Redis 异常。
+- 验证：`.venv\Scripts\python.exe -m pytest -q` → `68 passed`；`compileall` 与 `git diff --check` 通过。
+- 边界：尚未实现摘要 LLM、Chroma 情景记忆、用户画像和后台异步画像更新；Step 3.2 未开始。
