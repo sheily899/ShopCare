@@ -83,3 +83,12 @@ Step 3.1 的短期 Redis 工作记忆已完成；用户画像异步更新仍由 
 | `tests/test_memory_episodic.py` | 使用内存 Fake Redis、LLM 和 Chroma collection 验证摘要输入切分、固定降级文案、Redis 状态重置、Chroma 元数据与 500 字符 `full_text` 限制、两级召回优先级、`to_thread` 和异常隔离。 |
 
 Step 3.2 仍不包含用户画像集合、画像异步后台写回或 Step 3.3 的 profile 更新任务。
+
+## Step 3.3：用户画像异步更新与检索
+
+| 文件 | 职责 |
+| --- | --- |
+| `memory/conversation_memory.py` | 从当前会话最新 10 条工作记忆生成结构化用户画像；校验 `preferences` 与 `entities` 后，以稳定 `profile:{user_id}` 主键写入 `user_profile` Chroma 集合，并通过 `asyncio.to_thread` 隔离同步操作；提供画像读取、JSON 反序列化和空画像/异常兜底。画像更新协程捕获全部异常，适合 API 层后续用 `asyncio.create_task` 调度。 |
+| `tests/test_memory_profile_async.py` | 使用 Fake Redis、LLM 和 Chroma collection 验证画像正常提取、固定 LLM 参数、稳定主键与元数据、畸变 JSON 防覆盖、后台异常隔离、画像读取和默认空结构。 |
+
+Checkpoint C-1 已完成；Step 3.3 不在 API 路由中提前接入后台任务，也不包含 Step 4 的知识库检索和工具断路器。

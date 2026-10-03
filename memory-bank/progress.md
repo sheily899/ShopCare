@@ -101,3 +101,22 @@
 - 测试：新增 `tests/test_memory_episodic.py`，覆盖 15/5 滑窗、摘要截断与失败兜底、Chroma 元数据/截断、两级优先级检索、`to_thread` 和异常隔离。
 - 验证：`.venv\Scripts\python.exe -m pytest -q tests/test_memory_episodic.py` → `5 passed`；全量 `.venv\Scripts\python.exe -m pytest -q` → `73 passed`；`compileall` 与 `git diff --check` 通过。
 - 边界：未实现用户画像异步写回、`asyncio.create_task(update_profile)` 和 Step 3.3 逻辑。
+
+## Step 3.3：用户画像异步更新与检索
+
+- 状态：已完成，Checkpoint C-1 已闭环；等待人工确认后再进入 Step 4。
+- 修改：`memory/conversation_memory.py` 增加 `update_profile`、`get_user_profile`、`user_profile` Chroma 集合解析与异步持久化逻辑；新增 `tests/test_memory_profile_async.py`。
+- 提取：读取当前会话最新 10 条消息，使用 Anthropic 结构化 JSON 提取 `preferences` 与 `entities`，固定 `temperature=0`、`max_tokens=512`。
+- 校验：严格拒绝非 JSON、缺少关键字段、非字符串数组或畸变实体结构；校验失败不调用 Chroma 更新，不覆盖已有画像。
+- 持久化：稳定主键 `profile:{user_id}`，写入合法 JSON document 与 `user_id`、`conv_id`、`updated_at` 元数据；同步 Chroma 调用统一通过 `asyncio.to_thread`。
+- 异步隔离：`update_profile` 捕获所有未知异常，适配 API 层后续使用 `asyncio.create_task` 的非阻塞后台写回；失败只记录 warning，不影响对话主链路。
+- 读取：`get_user_profile` 能反序列化已有画像；画像不存在、损坏或 Chroma 异常时返回 `{"preferences": [], "entities": {}}`。
+- 验证：`.venv\Scripts\python.exe -m pytest -q tests/test_memory_profile_async.py` → `4 passed`；记忆相关回归 → `15 passed`；全量 `.venv\Scripts\python.exe -m pytest -q` → `77 passed`；compileall 与 `git diff --check` 通过。
+- 边界：未在 API 路由中接入画像后台任务，未实现 Step 4 知识库 RAG 与工具断路器。
+
+## Checkpoint C-1：三层记忆基础能力
+
+- [x] Redis 工作记忆通过。
+- [x] episodic 摘要压缩与两级召回通过。
+- [x] user_profile 异步写回、严格校验与读取兜底通过。
+- [x] `progress.md` 与 `architecture.md` 已同步。

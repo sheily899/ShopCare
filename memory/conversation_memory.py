@@ -23,6 +23,7 @@ TTL_SECONDS = 86400
 HISTORY_TOP_K = 5
 SUMMARY_MAX_CHARS = 800
 EPISODIC_FULL_TEXT_MAX_CHARS = 500
+PROFILE_DOC_PREFIX = "profile:"
 
 
 class MsgRole(str, Enum):
@@ -126,6 +127,7 @@ class MemoryManager:
         redis_url: Optional[str] = None,
         llm_client: Any = None,
         episodic_collection: Any = None,
+        profile_collection: Any = None,
         chroma_client: Any = None,
         model: Optional[str] = None,
     ) -> None:
@@ -142,6 +144,7 @@ class MemoryManager:
         self._llm_client = llm_client
         self._model = model or os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
         self._episodic = episodic_collection
+        self._profile = profile_collection
         self._chroma_client = chroma_client
         self.last_compression_triggered = False
         self.compression_trigger_key: Optional[str] = None
@@ -373,6 +376,147 @@ class MemoryManager:
     async def _resolve_episodic_collection(self) -> Any:
         """Resolve Chroma lazily without blocking the event loop."""
         return await asyncio.to_thread(self._get_episodic_collection)
+
+    def _get_profile_collection(self) -> Any:
+        if self._profile is not None:
+            return self._profile
+        if self._chroma_client is not None:
+            self._profile = self._chroma_client.get_or_create_collection("user_profile")
+            return self._profile
+        try:
+            import chromadb
+        except Exception as exc:  # pragma: no cover - optional runtime dependency
+            logger.warning("Chroma SDK 不可用，无法初始化用户画像: %s", exc)
+            return None
+
+        try:
+            host = os.getenv("CHROMA_HOST")
+            port = int(os.getenv("CHROMA_PORT", "8000"))
+            if host:
+                client = chromadb.HttpClient(host=host, port=port)
+            else:
+                client = chromadb.PersistentClient(
+                    path=os.getenv("CHROMA_PERSIST_DIRECTORY", "./data/chroma")
+                )
+            self._profile = client.get_or_create_collection("user_profile")
+        except Exception as exc:
+            logger.warning("Chroma 用户画像集合不可用: %s", exc)
+            return None
+        return self._profile
+
+    async def _resolve_profile_collection(self) -> Any:
+        """Resolve the profile collection off the event loop."""
+        return await asyncio.to_thread(self._get_profile_collection)
+
+    @staticmethod
+    def _validate_profile_data(data: Any) -> Dict[str, Any]:
+        if not isinstance(data, dict):
+            raise ValueError("用户画像必须是 JSON 对象")
+        preferences = data.get("preferences")
+        entities = data.get("entities")
+        if not isinstance(preferences, list) or any(
+            not isinstance(item, str) for item in preferences
+        ):
+            raise ValueError("用户画像 preferences 必须是字符串数组")
+        if not isinstance(entities, dict):
+            raise ValueError("用户画像 entities 必须是对象")
+        for key, values in entities.items():
+            if not isinstance(key, str) or not isinstance(values, list) or any(
+                not isinstance(item, str) for item in values
+            ):
+                raise ValueError("用户画像 entities 的值必须是字符串数组")
+        # Copy only the validated JSON-compatible shape so callers cannot
+        # mutate the object after it has been accepted for persistence.
+        return {
+            "preferences": list(preferences),
+            "entities": {key: list(values) for key, values in entities.items()},
+        }
+
+    @staticmethod
+    def _profile_prompt(messages: List[Message]) -> str:
+        return (
+            "请从以下最近对话中提取用户画像，只返回严格 JSON，不要添加 Markdown 或解释。\n"
+            "JSON 结构必须为：{\"preferences\":[\"...\"],\"entities\":{"
+            "\"order_id\":[],\"product\":[],\"date\":[],\"amount\":[],"
+            "\"error_code\":[]}}\n"
+            "只记录用户明确表达的偏好和已出现的实体；无法确认的字段使用空数组。\n"
+            "最近对话：\n"
+            + MemoryManager._format_messages(messages)
+        )
+
+    async def update_profile(
+        self,
+        user_id: str,
+        conv_id: str,
+        llm_client: Any = None,
+    ) -> None:
+        """Extract and persist a profile; safe for fire-and-forget tasks."""
+        try:
+            messages = await self._get_working_memory(user_id, conv_id, limit=10)
+            if not messages:
+                return
+
+            client = llm_client or await self._get_llm_client()
+            response = await client.messages.create(
+                model=self._model,
+                max_tokens=512,
+                temperature=0,
+                messages=[
+                    {"role": "user", "content": self._profile_prompt(messages)}
+                ],
+            )
+            raw_text = self._extract_llm_text(response).strip()
+            profile = self._validate_profile_data(json.loads(raw_text))
+            collection = await self._resolve_profile_collection()
+            if collection is None:
+                return
+
+            document_id = f"{PROFILE_DOC_PREFIX}{user_id}"
+            document = json.dumps(profile, ensure_ascii=False)
+            metadata = {
+                "user_id": str(user_id),
+                "conv_id": str(conv_id),
+                "updated_at": datetime.now().isoformat(),
+            }
+            values = {
+                "ids": [document_id],
+                "documents": [document],
+                "metadatas": [metadata],
+            }
+            upsert = getattr(collection, "upsert", None)
+            if upsert is not None:
+                await asyncio.to_thread(upsert, **values)
+            else:
+                delete = getattr(collection, "delete", None)
+                if delete is not None:
+                    await asyncio.to_thread(delete, ids=[document_id])
+                await asyncio.to_thread(collection.add, **values)
+        except Exception as exc:
+            # This method is designed for asyncio.create_task and must never
+            # turn a background profile failure into a chat request failure.
+            logger.warning("用户画像异步更新失败: %s", exc)
+
+    async def get_user_profile(self, user_id: str) -> Dict[str, Any]:
+        default = {"preferences": [], "entities": {}}
+        try:
+            collection = await self._resolve_profile_collection()
+            if collection is None:
+                return default
+            result = await asyncio.to_thread(
+                collection.get,
+                ids=[f"{PROFILE_DOC_PREFIX}{user_id}"],
+            )
+            documents = result.get("documents", []) if isinstance(result, dict) else []
+            if documents and isinstance(documents[0], list):
+                documents = documents[0]
+            if not documents:
+                return default
+            raw_document = documents[0]
+            parsed = json.loads(raw_document) if isinstance(raw_document, str) else raw_document
+            return self._validate_profile_data(parsed)
+        except Exception as exc:
+            logger.warning("用户画像读取失败: %s", exc)
+            return default
 
     async def _store_episodic(
         self,
