@@ -56,3 +56,12 @@ Pattern 结果同时保留旧兼容字段 `intent`/`confidence` 与后续融合�
 | `tests/test_intent_diagnostics.py` | 验证本地向量为固定 256 维、相似度范围、local fallback 标志以及 source/final diagnostics 完整性。 |
 
 本阶段没有实现复合意图拆分；`secondary_intents` 与 `compound_trigger` 保持契约默认值，等待 Step 2.4。
+
+## Step 2.4：复合意图解析与跨域次要意图切分
+
+| 文件 | 职责 |
+| --- | --- |
+| `core/intent_recognizer.py` | 定义连接词/标点白名单与 clause 切分；按最长规则命中选择子句候选；通过 technical/billing/general/escalation 域映射过滤泛化、同域和人工辅助候选；保留最多 3 个跨域 `secondary_intents`，生成 `compound_trigger`、clause diagnostics 与按领域的 scoped retrieval queries，并将结果装配到 `IntentResult`。 |
+| `tests/test_compound_intent.py` | 验证无分割信号时的单意图守门、技术+账单跨域识别、同域过滤、次意图 3 个上限、人工终止规则及 `recognize_intent` 字段装配。 |
+
+本阶段仍不执行 Agent fan-out 或知识库检索；scoped query 只是识别层输出，后续编排器必须只消费已确认的 `secondary_intents`，不能重新通过关键词猜测辅助 Agent。

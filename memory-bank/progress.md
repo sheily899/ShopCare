@@ -58,3 +58,21 @@
 - 测试：新增 `tests/test_intent_fusion.py`、`tests/test_intent_diagnostics.py`，覆盖本地 256 维向量、三路权重、0.5、0.45、0.8、500 覆盖和诊断字段。
 - 验证：`.venv\Scripts\python.exe -m pytest -q` → `54 passed`；`.venv\Scripts\python.exe -m compileall -q core tests` 与 `git diff --check` 通过。
 - 边界：未实现 Step 2.4 复合意图 clause 切分、secondary intents 或 scoped retrieval query；远程 Embedding 失败只回退本地哈希向量，不引入训练模型依赖。
+
+## Step 2.4：复合意图解析与跨域次要意图切分
+
+- 状态：已完成，Checkpoint B 已闭环；未开始 Step 3。
+- 修改：`core/intent_recognizer.py` 增加连接词/标点白名单切分、最长 Pattern 命中候选、三大业务域映射、同域与泛化候选过滤、跨域次意图去重及最多 3 个的硬上限。
+- 终止与诊断：主意图为 `HUMAN_HANDOFF` 时无条件清空 secondary；`compound_trigger` 记录切分触发词；诊断字段记录 clauses、clause matches、secondary intents 与 scoped retrieval queries。
+- 检索范围：存在合法 secondary 时按领域合并对应子句；没有合法 secondary 时保留完整原始消息作为默认查询。
+- 测试：新增 `tests/test_compound_intent.py`，覆盖单意图守门、技术+账单跨域、同域过滤、3 个上限、人工终止和主链路字段装配。
+- 验证：`.venv\Scripts\python.exe -m pytest -q` → `62 passed`；`.venv\Scripts\python.exe -m compileall -q core tests` 与 `git diff --check` 通过。
+- 边界：未实现 Agent 并发执行与真正的 RAG 调用；scoped query 目前作为识别诊断输出，Step 6 再由编排器消费。
+
+## Checkpoint B：意图与路由
+
+- [x] 18 类意图和 UrgencyLevel 通过。
+- [x] Tool Use、embedding、pattern 融合通过。
+- [x] 0.5、0.45、0.8 阈值和 500 覆盖通过。
+- [x] 复合意图最多 3 个且不会因单纯关键词共现触发跨域并发。
+- [x] 更新 progress.md 与 architecture.md。

@@ -757,6 +757,251 @@ _INTENT_GROUPS: Dict[IntentCategory, str] = {
 }
 
 
+COMPOUND_CONNECTORS: List[str] = [
+    "同时",
+    "另外",
+    "还想",
+    "还要",
+    "而且",
+    "并且",
+    "此外",
+    "分别",
+    "两个问题",
+    "两个诉求",
+    "除此之外",
+    "但是",
+    "不过",
+    "以及",
+]
+COMPOUND_CONNECTOR_WHITELIST = COMPOUND_CONNECTORS
+
+_COMPOUND_CONNECTOR_RE = "|".join(
+    re.escape(item) for item in sorted(COMPOUND_CONNECTORS, key=len, reverse=True)
+)
+_COMPOUND_CLAUSE_SPLIT_RE = re.compile(
+    rf"({_COMPOUND_CONNECTOR_RE}|[，,；;。！？!?\n])"
+)
+_COMPOUND_STRONG_TRIGGER_RE = re.compile(rf"(?:{_COMPOUND_CONNECTOR_RE})")
+_COMPOUND_TRIM_CHARS = " \t\r\n，,；;。！？!?：:"
+
+
+def _intent_domain(intent: IntentCategory) -> str:
+    """Map an intent to the three business domains used by compound routing."""
+    if intent in {
+        IntentCategory.TECHNICAL,
+        IntentCategory.TECHNICAL_LOGIN,
+        IntentCategory.TECHNICAL_CRASH,
+    }:
+        return "technical"
+    if intent in {
+        IntentCategory.BILLING,
+        IntentCategory.ACCOUNT,
+        IntentCategory.ACCOUNT_SECURITY,
+        IntentCategory.REFUND,
+        IntentCategory.INVOICE,
+        IntentCategory.PAYMENT_ISSUE,
+    }:
+        return "billing"
+    if intent is IntentCategory.HUMAN_HANDOFF:
+        return "escalation"
+    return "general"
+
+
+# These terms are only used when a clause is evaluated as an independent
+# compound request.  They make the scoped split more useful without widening
+# the Step 2.1 generic pattern contract.
+_COMPOUND_TECHNICAL_PATTERNS: Tuple[str, ...] = (
+    "开不了机",
+    "无法开机",
+    "屏幕花屏",
+    "花屏",
+)
+
+
+def _split_compound_parts(message: str) -> Tuple[List[str], List[str]]:
+    text = message or ""
+    parts = _COMPOUND_CLAUSE_SPLIT_RE.split(text)
+    clauses: List[str] = []
+    triggers: List[str] = []
+    pending_trigger = ""
+    for part in parts:
+        if not part:
+            continue
+        if _COMPOUND_CLAUSE_SPLIT_RE.fullmatch(part):
+            if part in COMPOUND_CONNECTORS or re.fullmatch(r"[，,；;。！？!?\n]", part):
+                pending_trigger = part
+            continue
+        clause = part.strip(_COMPOUND_TRIM_CHARS)
+        if clause:
+            clauses.append(clause)
+            if pending_trigger:
+                triggers.append(pending_trigger)
+                pending_trigger = ""
+    return clauses, triggers
+
+
+def split_compound_clauses(message: str) -> List[str]:
+    """Split only on the approved connectors and common sentence punctuation."""
+    clauses, _ = _split_compound_parts(message)
+    return clauses
+
+
+def _compound_match_lengths(pattern: str, clause: str) -> List[int]:
+    try:
+        return [len(match.group(0)) for match in re.finditer(pattern, clause, re.IGNORECASE)]
+    except re.error:
+        return [len(pattern)] if pattern.casefold() in clause.casefold() else []
+
+
+def _compound_clause_candidates(clause: str) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    pattern_tables = (
+        (True, SPECIFIC_PATTERNS),
+        (False, GENERIC_PATTERNS),
+        (True, {IntentCategory.TECHNICAL: _COMPOUND_TECHNICAL_PATTERNS}),
+    )
+    for is_specific, table in pattern_tables:
+        for intent, patterns in table.items():
+            for pattern in patterns:
+                lengths = _compound_match_lengths(pattern, clause)
+                if lengths:
+                    candidates.append(
+                        {
+                            "intent": intent,
+                            "length": max(lengths),
+                            "specific": is_specific,
+                            "match": max(
+                                (match.group(0) for match in re.finditer(pattern, clause, re.IGNORECASE)),
+                                key=len,
+                                default=pattern,
+                            ),
+                        }
+                    )
+    candidates.sort(key=lambda item: (-item["length"], not item["specific"]))
+    return candidates
+
+
+def _best_compound_clause_candidate(clause: str) -> Optional[Dict[str, Any]]:
+    candidates = _compound_clause_candidates(clause)
+    if not candidates:
+        return None
+    specific_domains = {
+        _intent_domain(item["intent"])
+        for item in candidates
+        if item["specific"] and item["intent"] is not IntentCategory.HUMAN_HANDOFF
+    }
+    filtered = [
+        item
+        for item in candidates
+        if not (
+            not item["specific"]
+            and _intent_domain(item["intent"]) in specific_domains
+        )
+    ]
+    return (filtered or candidates)[0]
+
+
+def detect_compound_intents(
+    message: str,
+    primary_intent: IntentCategory,
+) -> Tuple[List[IntentCategory], str, Dict[str, Any]]:
+    """Return conservative cross-domain secondary intents for a compound message."""
+    text = message or ""
+    if primary_intent is IntentCategory.HUMAN_HANDOFF:
+        return [], "", {"terminal_handoff": True, "clauses": [], "clause_matches": []}
+
+    clauses, triggers = _split_compound_parts(text)
+    diagnostics: Dict[str, Any] = {
+        "terminal_handoff": False,
+        "clauses": list(clauses),
+        "clause_matches": [],
+        "clause_intents": [],
+        "compound_detected": len(clauses) >= 2,
+    }
+    if len(clauses) < 2:
+        return [], "", diagnostics
+
+    clause_matches: List[Dict[str, Any]] = []
+    for clause in clauses:
+        candidate = _best_compound_clause_candidate(clause)
+        if candidate is None:
+            continue
+        record = {
+            "clause": clause,
+            "intent": candidate["intent"].value,
+            "domain": _intent_domain(candidate["intent"]),
+            "match": candidate["match"],
+        }
+        clause_matches.append(record)
+
+    diagnostics["clause_matches"] = clause_matches
+    diagnostics["clause_intents"] = [item["intent"] for item in clause_matches]
+    primary_domain = _intent_domain(primary_intent)
+    secondary: List[IntentCategory] = []
+    for item in clause_matches:
+        intent = IntentCategory(item["intent"])
+        if intent is IntentCategory.HUMAN_HANDOFF:
+            continue
+        if intent is primary_intent or _intent_domain(intent) == primary_domain:
+            continue
+        if intent not in secondary:
+            secondary.append(intent)
+
+    secondary = secondary[:3]
+    trigger = triggers[0] if triggers else ""
+    if not secondary:
+        diagnostics["compound_detected"] = False
+    diagnostics["secondary_intents"] = [intent.value for intent in secondary]
+    return secondary, trigger, diagnostics
+
+
+def _detect_secondary_intents(
+    message: str,
+    primary_intent: IntentCategory,
+) -> Tuple[List[IntentCategory], str]:
+    """Compatibility helper returning the original two-value contract."""
+    secondary, trigger, _ = detect_compound_intents(message, primary_intent)
+    return secondary, trigger
+
+
+def build_scoped_retrieval_queries(
+    message: str,
+    secondary_intents: List[IntentCategory],
+    clause_matches: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, str]:
+    """Build domain-scoped queries; without valid secondary intents keep the full text."""
+    text = message or ""
+    if not secondary_intents:
+        return {"default": text}
+    matches = clause_matches or []
+    queries: Dict[str, List[str]] = {}
+    target_intents = set(secondary_intents)
+    for item in matches:
+        intent = _coerce_intent(item.get("intent"))
+        if intent in target_intents:
+            queries.setdefault(_intent_domain(intent), []).append(item["clause"])
+    return {
+        domain: "；".join(dict.fromkeys(clauses))
+        for domain, clauses in queries.items()
+    } or {"default": text}
+
+
+def resolve_compound_intents(
+    message: str,
+    primary_intent: IntentCategory,
+) -> Dict[str, Any]:
+    secondary, trigger, diagnostics = detect_compound_intents(message, primary_intent)
+    diagnostics["scoped_retrieval_queries"] = build_scoped_retrieval_queries(
+        message, secondary, diagnostics.get("clause_matches")
+    )
+    return {
+        "secondary_intents": secondary,
+        "compound_trigger": trigger,
+        "scoped_retrieval_queries": diagnostics["scoped_retrieval_queries"],
+        "diagnostics": diagnostics,
+    }
+
+
 def _coerce_intent(value: Any) -> IntentCategory:
     if isinstance(value, IntentCategory):
         return value
@@ -975,6 +1220,10 @@ async def recognize_intent(
     normalized_confidence = _bounded_score(round(final_confidence, 6))
     diagnostics["final_confidence"] = normalized_confidence
 
+    compound = resolve_compound_intents(message, final_intent)
+    diagnostics.update(compound["diagnostics"])
+    diagnostics["scoped_retrieval_queries"] = compound["scoped_retrieval_queries"]
+
     if llm.success and llm.reasoning:
         reasoning = llm.reasoning
     elif diagnostics["fallback"] == "embedding":
@@ -996,5 +1245,7 @@ async def recognize_intent(
         latency_ms=max(0.0, round((time.perf_counter() - started_at) * 1000, 3)),
         source_scores=source_scores,
         source_intents=source_intents,
+        secondary_intents=compound["secondary_intents"],
+        compound_trigger=compound["compound_trigger"],
         intent_diagnostics=diagnostics,
     )
