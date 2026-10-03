@@ -1,3 +1,10 @@
+"""ShopCare 意图识别与复合路由核心模块。
+
+本模块负责内部意图枚举、dataclass 结果契约、Pattern 与实体规则、可选的
+Anthropic/Embedding 适配器和确定性的融合状态机；不执行领域 Agent，不修改
+订单，也不产生真实转人工副作用。
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -17,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 
 class IntentCategory(str, Enum):
+    """所有识别通路都必须使用的封闭意图枚举集合。"""
+
     QUERY = "query"
     COMPLAINT = "complaint"
     REQUEST = "request"
@@ -39,6 +48,8 @@ class IntentCategory(str, Enum):
 
 
 class UrgencyLevel(IntEnum):
+    """用于路由与安全仲裁的有序紧急度等级。"""
+
     LOW = 1
     MEDIUM = 2
     HIGH = 3
@@ -47,6 +58,23 @@ class UrgencyLevel(IntEnum):
 
 @dataclass
 class IntentResult:
+    """意图识别流水线最终产出的统一内部结果。
+
+    Args:
+        intent: 融合与覆盖后的最终主意图。
+        confidence: 最终意图的归一化置信度。
+        urgency: 请求的确定性紧急度。
+        intent_group: 供下游路由使用的粗粒度业务分组。
+        entities: 五键实体抽取结果。
+        reasoning: 面向维护与诊断的判定理由。
+        latency_ms: 识别耗时，单位为毫秒。
+        source_scores: 各识别来源的置信度诊断。
+        source_intents: 各识别来源的意图诊断。
+        secondary_intents: 合法的跨域辅助意图。
+        compound_trigger: 触发复合分析的连接词。
+        intent_diagnostics: 详细状态机诊断信息。
+    """
+
     intent: IntentCategory
     confidence: float
     urgency: UrgencyLevel
@@ -63,7 +91,15 @@ class IntentResult:
 
 @dataclass
 class LLMIntentResult:
-    """Internal result contract for the isolated LLM intent source."""
+    """隔离的 LLM 意图来源内部结果契约。
+
+    Args:
+        intent: Tool Use 返回的意图，失败时为 ``OTHER``。
+        confidence: 截断到 0..1 的 Tool Use 置信度。
+        reasoning: 模型解释或确定性的失败说明。
+        success: LLM 来源是否产出合法结果。
+        diagnostics: 该来源的校验与失败元数据。
+    """
 
     intent: IntentCategory
     confidence: float
@@ -72,16 +108,41 @@ class LLMIntentResult:
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     def __getitem__(self, key: str) -> Any:
-        """Keep dict-style access convenient for the later fusion adapter."""
+        """按兼容旧调用方的映射方式读取结果字段。
+
+        Args:
+            key: dataclass 属性名。
+
+        Returns:
+            对应属性中的值。
+        """
         return getattr(self, key)
 
     def get(self, key: str, default: Any = None) -> Any:
+        """读取结果字段，未知字段时返回默认值。
+
+        Args:
+            key: dataclass 属性名。
+            default: 属性不存在时返回的值。
+
+        Returns:
+            属性值或 ``default``。
+        """
         return getattr(self, key, default)
 
 
 @dataclass
 class EmbeddingIntentResult:
-    """Internal result contract for the embedding intent source."""
+    """Embedding 意图来源的内部结果契约。
+
+    Args:
+        intent: 模板相似度最高的意图。
+        score: 归一化到 0..1 的余弦相似度。
+        success: 是否产出可用的 Embedding 结果。
+        local_fallback: 是否使用固定本地哈希向量。
+        reasoning: 向量来源说明。
+        diagnostics: Embedding 来源元数据。
+    """
 
     intent: IntentCategory
     score: float
@@ -92,12 +153,34 @@ class EmbeddingIntentResult:
 
     @property
     def confidence(self) -> float:
+        """通过统一的来源置信度名称暴露相似度分数。
+
+        Returns:
+            Embedding 相似度分数。
+        """
         return self.score
 
     def __getitem__(self, key: str) -> Any:
+        """按映射兼容方式读取结果字段。
+
+        Args:
+            key: dataclass 属性名。
+
+        Returns:
+            对应属性中的值。
+        """
         return getattr(self, key)
 
     def get(self, key: str, default: Any = None) -> Any:
+        """读取结果字段并为未知字段提供默认值。
+
+        Args:
+            key: dataclass 属性名。
+            default: 属性不存在时返回的值。
+
+        Returns:
+            属性值或 ``default``。
+        """
         return getattr(self, key, default)
 
 
@@ -126,7 +209,7 @@ CLASSIFY_INTENT_TOOL: Dict[str, Any] = {
     },
 }
 
-# Keep the source-oriented name available for the later fusion implementation.
+# 保留来源导向的别名，供后续融合实现继续使用。
 _INTENT_TOOL = CLASSIFY_INTENT_TOOL
 DEFAULT_LLM_MODEL = "claude-3-5-sonnet-20241022"
 _LLM_SYSTEM_PROMPT = """你是 ShopCare 的电商客服意图分析器。
@@ -140,7 +223,15 @@ def _build_llm_user_message(
     message: str,
     history: Optional[List[Any]],
 ) -> str:
-    """Build the user-side prompt while keeping history optional and bounded."""
+    """构造发送给 LLM 分类器的有界用户提示词。
+
+    Args:
+        message: 当前用户消息。
+        history: 可选的历史消息对象或字典列表。
+
+    Returns:
+        最多包含最近三条历史消息的提示词。
+    """
     current = message or ""
     if not history:
         return current
@@ -161,7 +252,14 @@ def _build_llm_user_message(
 
 
 def _extract_intent_tool_input(content: Any) -> Optional[Dict[str, Any]]:
-    """Extract the strict classify_intent tool payload from an Anthropic response."""
+    """从 LLM 响应中提取一个严格的 ``classify_intent`` 工具参数。
+
+    Args:
+        content: Anthropic 内容块，可以是对象或字典。
+
+    Returns:
+        工具输入字典；没有合法工具块时返回 ``None``。
+    """
     for block in content or []:
         block_type = getattr(block, "type", None)
         name = getattr(block, "name", None)
@@ -180,6 +278,14 @@ def _extract_intent_tool_input(content: Any) -> Optional[Dict[str, Any]]:
 
 
 def _failed_llm_result(reason: str) -> LLMIntentResult:
+    """创建 LLM 失败路径使用的确定性 ``OTHER`` 结果。
+
+    Args:
+        reason: 保存在诊断结果中的失败详情。
+
+    Returns:
+        置信度为零的失败 ``LLMIntentResult``。
+    """
     return LLMIntentResult(
         intent=IntentCategory.OTHER,
         confidence=0.0,
@@ -190,7 +296,14 @@ def _failed_llm_result(reason: str) -> LLMIntentResult:
 
 
 def _get_default_anthropic_client() -> Any:
-    """Create the SDK client lazily so pure pattern tests need no SDK import."""
+    """为未注入客户端的调用方惰性创建 Anthropic 客户端。
+
+    Returns:
+        配置好的 ``AsyncAnthropic`` 客户端。
+
+    Raises:
+        RuntimeError: 无法导入可选 SDK 时抛出。
+    """
     try:
         from anthropic import AsyncAnthropic
     except Exception as exc:  # pragma: no cover - depends on optional local install
@@ -204,7 +317,17 @@ async def _recognize_with_llm(
     client: Any = None,
     model: Optional[str] = None,
 ) -> LLMIntentResult:
-    """Classify one message through Anthropic Tool Use with safe fallback semantics."""
+    """通过 Anthropic Tool Use 分类单条消息，并提供安全降级语义。
+
+    Args:
+        message: 待分类的当前用户消息。
+        history: 仅用于提示词的可选会话上下文。
+        client: 可选的 Anthropic 兼容注入客户端。
+        model: 可选模型覆盖值。
+
+    Returns:
+        校验后的 ``LLMIntentResult``；失败时返回 ``OTHER``，不向编排层冒泡。
+    """
     try:
         if not isinstance(message, str) or not message.strip():
             raise ValueError("待分析消息不能为空")
@@ -309,7 +432,14 @@ EMBEDDING_TEMPLATES: Dict[IntentCategory, Tuple[str, ...]] = {
 
 
 def _hash_ngram_vector(text: str) -> List[float]:
-    """Build the fixed 256-dimension local 1/2/3-gram MD5 vector."""
+    """构造固定 256 维的本地 1/2/3-gram MD5 向量。
+
+    Args:
+        text: 待归一化并哈希的输入文本。
+
+    Returns:
+        确定性的 256 维有符号哈希向量。
+    """
     normalized = (text or "").casefold().strip()
     vector = [0.0] * HASH_EMBEDDING_DIM
     tokens = set()
@@ -329,6 +459,15 @@ def _hash_ngram_vector(text: str) -> List[float]:
 
 
 def _cosine_similarity(left: List[float], right: List[float]) -> float:
+    """计算两个等长向量的有界余弦相似度。
+
+    Args:
+        left: 第一个数值向量。
+        right: 第二个数值向量。
+
+    Returns:
+        截断在 0..1 的相似度；向量非法时返回零。
+    """
     if not left or not right or len(left) != len(right):
         return 0.0
     denominator = math.sqrt(sum(value * value for value in left)) * math.sqrt(
@@ -341,6 +480,14 @@ def _cosine_similarity(left: List[float], right: List[float]) -> float:
 
 
 def _parse_remote_embeddings(payload: Any) -> Optional[List[List[float]]]:
+    """归一化常见远程 Embedding 响应结构。
+
+    Args:
+        payload: 原始响应对象、映射或向量列表。
+
+    Returns:
+        浮点向量列表；载荷畸变时返回 ``None``。
+    """
     if hasattr(payload, "json") and callable(payload.json):
         payload = payload.json()
     if isinstance(payload, dict):
@@ -363,7 +510,15 @@ async def _fetch_remote_embeddings(
     texts: List[str],
     remote_client: Any = None,
 ) -> Optional[List[List[float]]]:
-    """Try an optional compatible embedding endpoint; callers always have local fallback."""
+    """尝试远程 Embedding 端点，同时保留本地降级行为。
+
+    Args:
+        texts: 必须按顺序生成向量的文本列表。
+        remote_client: 可选的注入 callable 或 HTTP 风格客户端。
+
+    Returns:
+        响应合法时返回远程向量，否则返回 ``None`` 让调用方使用哈希向量。
+    """
     url = os.getenv("EMBEDDING_API_URL", "").strip()
     if not url:
         return None
@@ -404,7 +559,15 @@ async def _recognize_with_embedding(
     message: str,
     remote_client: Any = None,
 ) -> EmbeddingIntentResult:
-    """Return the best template match, preferring remote vectors and degrading locally."""
+    """返回最佳模板匹配，优先远程向量，失败时本地降级。
+
+    Args:
+        message: 与意图模板库比较的用户消息。
+        remote_client: 可选的远程 Embedding 适配器。
+
+    Returns:
+        相似度最高的 ``EmbeddingIntentResult``。
+    """
     template_items = list(EMBEDDING_TEMPLATES.items())
     flattened_templates = [
         (intent, text)
@@ -444,9 +607,8 @@ async def _recognize_with_embedding(
     )
 
 
-# Specific patterns take precedence over generic domain labels when scores tie.
-# Values are regular-expression fragments; ASCII terms use explicit word
-# boundaries where a substring match would create false positives.
+# 分数相同时，特异规则优先于泛化业务域标签。
+# 规则值是正则片段；ASCII 词使用显式单词边界，避免子串命中造成误判。
 SPECIFIC_PATTERNS: Dict[IntentCategory, Tuple[str, ...]] = {
     IntentCategory.ORDER_STATUS: (
         "订单状态",
@@ -623,20 +785,41 @@ _STANDALONE_ERROR_CODE_RE = re.compile(r"\b[45]\d{2}\b")
 
 
 def _pattern_matches(pattern: str, message: str) -> bool:
+    """判断一个正则或字面规则是否命中消息。
+
+    Args:
+        pattern: 规则表中的正则片段。
+        message: 归一化后的用户消息。
+
+    Returns:
+        规则存在时返回 ``True``。
+    """
     return re.search(pattern, message, flags=re.IGNORECASE) is not None
 
 
 def _pattern_score(hits: int) -> float:
+    """将规则命中次数转换为固定的确定性 Pattern 分数。
+
+    Args:
+        hits: 某意图的规则命中次数。
+
+    Returns:
+        从 0.5 起步并封顶为 1.0 的分数。
+    """
     if hits <= 0:
         return 0.0
+    # 0.5 是单条规则的最低证据分；额外独立命中增加证据，但不允许重复关键词无限抬高置信度。
     return min(1.0, 0.5 + 0.25 * (hits - 1))
 
 
 def match_patterns(message: str) -> Dict[str, Any]:
-    """Match specific and generic rules without calling an external service.
+    """不调用外部服务，匹配特异规则与泛化规则。
 
-    The return shape keeps the old ``intent``/``confidence`` keys and adds the
-    candidate scores needed by later fusion steps.
+    Args:
+        message: 待与本地规则表匹配的用户消息。
+
+    Returns:
+        包含最佳意图、候选、分数、命中次数和最强特异候选的兼容字典。
     """
     normalized = message or ""
     scores: Dict[IntentCategory, float] = {}
@@ -687,16 +870,39 @@ def match_patterns(message: str) -> Dict[str, Any]:
 
 
 def _pattern_recognize(message: str) -> Dict[str, Any]:
-    """Compatibility name for the original synchronous pattern strategy."""
+    """保留原工程同步 Pattern 识别器的入口名称。
+
+    Args:
+        message: 待分类的用户消息。
+
+    Returns:
+        与 :func:`match_patterns` 相同的结果字典。
+    """
     return match_patterns(message)
 
 
 def _unique(values: List[str]) -> List[str]:
+    """清理空白并保持实体首次出现顺序。
+
+    Args:
+        values: 原始实体值列表。
+
+    Returns:
+        去重后的非空实体值列表。
+    """
     return list(dict.fromkeys(value.strip() for value in values if value and value.strip()))
 
 
 def extract_entities(message: str) -> Dict[str, List[str]]:
-    """Extract the five fact-based entity fields used by the intent contract."""
+    """抽取意图契约规定的五类事实实体字段。
+
+    Args:
+        message: 可能包含订单、日期、金额或错误码的用户消息。
+
+    Returns:
+        严格包含 ``order_id``、``product``、``date``、``amount``、``error_code``
+        五个 key 的字典；商品词表尚未实现，因此 product 始终为空列表。
+    """
     text = message or ""
     labeled_codes = _LABELED_ERROR_CODE_RE.findall(text)
     standalone_codes = _STANDALONE_ERROR_CODE_RE.findall(text)
@@ -710,6 +916,15 @@ def extract_entities(message: str) -> Dict[str, List[str]]:
 
 
 def _contains_urgency_keyword(message: str, keyword: str) -> bool:
+    """匹配紧急度关键词，并为 ASCII 词处理单词边界。
+
+    Args:
+        message: 待检查的用户消息。
+        keyword: 中文或 ASCII 紧急度关键词。
+
+    Returns:
+        关键词存在时返回 ``True``。
+    """
     if keyword.isascii() and keyword.replace("_", "").replace("-", "").isalnum():
         return re.search(rf"\b{re.escape(keyword)}\b", message, re.IGNORECASE) is not None
     return keyword.casefold() in message.casefold()
@@ -719,7 +934,15 @@ def calculate_urgency(
     message: str,
     intent: Optional[IntentCategory] = None,
 ) -> UrgencyLevel:
-    """Apply the fixed CRITICAL -> HIGH -> MEDIUM -> intent fallback order."""
+    """应用固定的 CRITICAL -> HIGH -> MEDIUM -> 意图兜底优先级。
+
+    Args:
+        message: 包含紧急表达的用户消息。
+        intent: 已选定的可选意图，用于无关键词时的紧急度兜底。
+
+    Returns:
+        按优先级链选出的确定性 ``UrgencyLevel``。
+    """
     text = message or ""
     for level in (UrgencyLevel.CRITICAL, UrgencyLevel.HIGH, UrgencyLevel.MEDIUM):
         if any(_contains_urgency_keyword(text, word) for word in _URGENCY_KEYWORDS[level]):
@@ -736,8 +959,19 @@ def apply_500_override(
     intent: IntentCategory,
     confidence: float,
 ) -> Tuple[IntentCategory, float]:
-    """Force a non-login 500 response into technical_crash with confidence >= .8."""
+    """将非登录场景的 500 响应强制覆盖为 technical_crash，置信度至少为 0.8。
+
+    Args:
+        message: 用于检查服务端错误标记的用户消息。
+        intent: 当前候选意图。
+        confidence: 当前候选置信度。
+
+    Returns:
+        可能经过覆盖的意图与置信度二元组。
+    """
+    # 500 是高风险技术信号；0.8 防止较弱来源掩盖崩溃，同时保留登录专属例外。
     if "500" in (message or "") and intent != IntentCategory.TECHNICAL_LOGIN:
+        # 0.8 置信度下限确保状态码安全覆盖具有决定性。
         return IntentCategory.TECHNICAL_CRASH, max(float(confidence), 0.8)
     return intent, float(confidence)
 
@@ -786,7 +1020,14 @@ _COMPOUND_TRIM_CHARS = " \t\r\n，,；;。！？!?：:"
 
 
 def _intent_domain(intent: IntentCategory) -> str:
-    """Map an intent to the three business domains used by compound routing."""
+    """将意图映射到复合路由使用的三个业务域。
+
+    Args:
+        intent: 待映射的意图。
+
+    Returns:
+        ``technical``、``billing``、``escalation`` 或 ``general``。
+    """
     if intent in {
         IntentCategory.TECHNICAL,
         IntentCategory.TECHNICAL_LOGIN,
@@ -807,9 +1048,8 @@ def _intent_domain(intent: IntentCategory) -> str:
     return "general"
 
 
-# These terms are only used when a clause is evaluated as an independent
-# compound request.  They make the scoped split more useful without widening
-# the Step 2.1 generic pattern contract.
+# 这些词只在子句被当作独立复合诉求评估时使用；这样可以提升 scoped split
+# 的实用性，同时不扩大 Step 2.1 的通用 Pattern 契约。
 _COMPOUND_TECHNICAL_PATTERNS: Tuple[str, ...] = (
     "开不了机",
     "无法开机",
@@ -819,6 +1059,14 @@ _COMPOUND_TECHNICAL_PATTERNS: Tuple[str, ...] = (
 
 
 def _split_compound_parts(message: str) -> Tuple[List[str], List[str]]:
+    """按白名单连接词和标点拆分子句并记录触发词。
+
+    Args:
+        message: 原始用户消息。
+
+    Returns:
+        子句列表与按原文顺序记录的连接词/标点列表。
+    """
     text = message or ""
     parts = _COMPOUND_CLAUSE_SPLIT_RE.split(text)
     clauses: List[str] = []
@@ -841,12 +1089,28 @@ def _split_compound_parts(message: str) -> Tuple[List[str], List[str]]:
 
 
 def split_compound_clauses(message: str) -> List[str]:
-    """Split only on the approved connectors and common sentence punctuation."""
+    """仅按批准的连接词和常见句末标点拆分复合消息。
+
+    Args:
+        message: 原始用户消息。
+
+    Returns:
+        过滤空白后的子句列表。
+    """
     clauses, _ = _split_compound_parts(message)
     return clauses
 
 
 def _compound_match_lengths(pattern: str, clause: str) -> List[int]:
+    """计算 Pattern 在单个子句中的匹配长度。
+
+    Args:
+        pattern: 待匹配的正则或字面规则。
+        clause: 独立复合子句。
+
+    Returns:
+        所有命中片段的字符长度；规则非法时使用安全字面匹配。
+    """
     try:
         return [len(match.group(0)) for match in re.finditer(pattern, clause, re.IGNORECASE)]
     except re.error:
@@ -854,6 +1118,14 @@ def _compound_match_lengths(pattern: str, clause: str) -> List[int]:
 
 
 def _compound_clause_candidates(clause: str) -> List[Dict[str, Any]]:
+    """为一个子句生成按匹配长度排序的意图候选。
+
+    Args:
+        clause: 待独立识别的复合子句。
+
+    Returns:
+        包含意图、匹配长度、特异性和命中文本的候选字典列表。
+    """
     candidates: List[Dict[str, Any]] = []
     pattern_tables = (
         (True, SPECIFIC_PATTERNS),
@@ -882,6 +1154,14 @@ def _compound_clause_candidates(clause: str) -> List[Dict[str, Any]]:
 
 
 def _best_compound_clause_candidate(clause: str) -> Optional[Dict[str, Any]]:
+    """筛选一个子句的最长且最具体合法候选。
+
+    Args:
+        clause: 待筛选的复合子句。
+
+    Returns:
+        最佳候选字典；没有规则命中时返回 ``None``。
+    """
     candidates = _compound_clause_candidates(clause)
     if not candidates:
         return None
@@ -905,7 +1185,15 @@ def detect_compound_intents(
     message: str,
     primary_intent: IntentCategory,
 ) -> Tuple[List[IntentCategory], str, Dict[str, Any]]:
-    """Return conservative cross-domain secondary intents for a compound message."""
+    """为复合消息返回保守的跨域辅助意图。
+
+    Args:
+        message: 原始用户消息。
+        primary_intent: 已确定的主意图。
+
+    Returns:
+        辅助意图列表、触发词和复合识别诊断字典。
+    """
     text = message or ""
     if primary_intent is IntentCategory.HUMAN_HANDOFF:
         return [], "", {"terminal_handoff": True, "clauses": [], "clause_matches": []}
@@ -959,7 +1247,15 @@ def _detect_secondary_intents(
     message: str,
     primary_intent: IntentCategory,
 ) -> Tuple[List[IntentCategory], str]:
-    """Compatibility helper returning the original two-value contract."""
+    """兼容旧调用方的二元复合意图返回契约。
+
+    Args:
+        message: 原始用户消息。
+        primary_intent: 已确定的主意图。
+
+    Returns:
+        辅助意图列表和触发词。
+    """
     secondary, trigger, _ = detect_compound_intents(message, primary_intent)
     return secondary, trigger
 
@@ -969,7 +1265,16 @@ def build_scoped_retrieval_queries(
     secondary_intents: List[IntentCategory],
     clause_matches: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, str]:
-    """Build domain-scoped queries; without valid secondary intents keep the full text."""
+    """构造领域检索 query；没有合法辅助意图时保留完整原文。
+
+    Args:
+        message: 原始用户消息。
+        secondary_intents: 已过滤的跨域辅助意图。
+        clause_matches: 子句命中诊断，用于提取领域范围文本。
+
+    Returns:
+        以业务域为 key 的 scoped retrieval query 字典。
+    """
     text = message or ""
     if not secondary_intents:
         return {"default": text}
@@ -990,6 +1295,15 @@ def resolve_compound_intents(
     message: str,
     primary_intent: IntentCategory,
 ) -> Dict[str, Any]:
+    """完成复合意图识别并装配 scoped retrieval 诊断。
+
+    Args:
+        message: 原始用户消息。
+        primary_intent: 已确定的主意图。
+
+    Returns:
+        包含辅助意图、触发词、scoped query 与完整诊断的字典。
+    """
     secondary, trigger, diagnostics = detect_compound_intents(message, primary_intent)
     diagnostics["scoped_retrieval_queries"] = build_scoped_retrieval_queries(
         message, secondary, diagnostics.get("clause_matches")
@@ -1003,6 +1317,14 @@ def resolve_compound_intents(
 
 
 def _coerce_intent(value: Any) -> IntentCategory:
+    """将外部来源值安全转换为 ``IntentCategory``。
+
+    Args:
+        value: 可能是枚举、字符串或非法外部值。
+
+    Returns:
+        合法意图；无法转换时返回 ``OTHER``。
+    """
     if isinstance(value, IntentCategory):
         return value
     try:
@@ -1012,6 +1334,14 @@ def _coerce_intent(value: Any) -> IntentCategory:
 
 
 def _bounded_score(value: Any) -> float:
+    """将来源分数安全归一化到 0..1。
+
+    Args:
+        value: 外部来源给出的任意分数值。
+
+    Returns:
+        有限且位于 0..1 的浮点分数。
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0
     numeric = float(value)
@@ -1021,6 +1351,14 @@ def _bounded_score(value: Any) -> float:
 
 
 def _normalize_llm_source(value: Any) -> LLMIntentResult:
+    """把 LLM 来源的字典或对象归一化为内部 dataclass。
+
+    Args:
+        value: LLM 来源返回值。
+
+    Returns:
+        归一化后的 LLM 结果，异常结构转为失败结果。
+    """
     if isinstance(value, LLMIntentResult):
         return value
     if isinstance(value, dict):
@@ -1038,6 +1376,14 @@ def _normalize_llm_source(value: Any) -> LLMIntentResult:
 
 
 def _normalize_embedding_source(value: Any) -> EmbeddingIntentResult:
+    """把 Embedding 来源的字典或对象归一化为内部 dataclass。
+
+    Args:
+        value: Embedding 来源返回值。
+
+    Returns:
+        归一化后的 Embedding 结果，异常结构转为失败结果。
+    """
     if isinstance(value, EmbeddingIntentResult):
         return value
     if isinstance(value, dict):
@@ -1067,6 +1413,14 @@ def _normalize_embedding_source(value: Any) -> EmbeddingIntentResult:
 
 
 def _pattern_score_map(pattern_result: Dict[str, Any]) -> Dict[IntentCategory, float]:
+    """将 Pattern 结果中的字符串意图分数转换为枚举映射。
+
+    Args:
+        pattern_result: Pattern 识别器的兼容结果字典。
+
+    Returns:
+        以 ``IntentCategory`` 为 key 的安全分数映射。
+    """
     scores: Dict[IntentCategory, float] = {}
     for raw_intent, raw_score in dict(pattern_result.get("scores", {})).items():
         intent = _coerce_intent(raw_intent)
@@ -1081,6 +1435,14 @@ def _pattern_score_map(pattern_result: Dict[str, Any]) -> Dict[IntentCategory, f
 
 
 def _intent_group(intent: IntentCategory) -> str:
+    """返回意图对应的粗粒度业务分组。
+
+    Args:
+        intent: 已归一化的意图。
+
+    Returns:
+        下游路由使用的分组字符串。
+    """
     return _INTENT_GROUPS.get(intent, intent.value)
 
 
@@ -1088,7 +1450,15 @@ async def recognize_intent(
     message: str,
     history: Optional[List[Any]] = None,
 ) -> IntentResult:
-    """Run LLM, embedding and pattern sources, then apply the fixed fusion state machine."""
+    """并发运行 LLM、Embedding、Pattern，并应用固定融合状态机。
+
+    Args:
+        message: 待识别的用户消息。
+        history: 可选的近期会话上下文。
+
+    Returns:
+        装配了意图、置信度、实体、紧急度和诊断信息的 ``IntentResult``。
+    """
     started_at = time.perf_counter()
     llm_task = asyncio.create_task(_recognize_with_llm(message, history))
     embedding_task = asyncio.create_task(_recognize_with_embedding(message))
@@ -1166,6 +1536,7 @@ async def recognize_intent(
             final_intent = specific_intent
             final_confidence = specific_score
             diagnostics["fallback"] = "specific_pattern"
+        # 0.45 是 LLM 失败时 Embedding 作为兜底的最低相似度，避免弱匹配误路由。
         elif embedding.success and embedding.score >= 0.45:
             final_intent = embedding.intent
             final_confidence = embedding.score
@@ -1194,6 +1565,7 @@ async def recognize_intent(
         candidate, fused_confidence = max(
             fused_scores.items(), key=lambda item: item[1], default=(IntentCategory.OTHER, 0.0)
         )
+        # 融合分低于 0.5 时证据不足，强制 OTHER 以降低错误分流风险。
         if fused_confidence < 0.5:
             diagnostics["fallback"] = "low_fused_score"
         else:
@@ -1203,6 +1575,7 @@ async def recognize_intent(
                 candidate in _GENERIC_INTENTS
                 and specific_intent is not IntentCategory.OTHER
                 and specific_intent is not candidate
+                # 0.5 是特异规则最低证据，0.8 是避免覆盖高置信泛化结果的保护线。
                 and specific_score >= 0.5
                 and fused_confidence < 0.8
             ):

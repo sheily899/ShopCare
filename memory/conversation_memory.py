@@ -1,3 +1,10 @@
+"""ShopCare 会话记忆与用户画像存储模块。
+
+本模块属于 memory 层，负责 Redis 工作记忆、摘要压缩、Chroma 情景记忆和
+用户画像的异步读写；它只提供上下文持久化与召回，不负责意图路由或真实业务写操作。
+所有同步 Chroma 调用都通过线程封装，避免阻塞事件循环。
+"""
+
 from __future__ import annotations
 
 import inspect
@@ -16,9 +23,13 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# 20 条读取上限控制单次上下文预算，避免工作记忆无限增长。
 WORKING_MAX = 20
+# 15 条进入压缩入口，用摘要替换旧消息以控制 Token 成本。
 COMPRESS_AT = 15
+# 压缩后保留最新 5 条，兼顾短期连贯性与上下文长度。
 KEEP_AFTER_COMPRESS = 5
+# 86400 秒是一日 TTL，防止过期会话长期占用 Redis 与上下文预算。
 TTL_SECONDS = 86400
 HISTORY_TOP_K = 5
 SUMMARY_MAX_CHARS = 800
@@ -27,6 +38,8 @@ PROFILE_DOC_PREFIX = "profile:"
 
 
 class MsgRole(str, Enum):
+    """消息角色枚举，用于区分用户、助手和系统上下文。"""
+
     USER = "user"
     ASSISTANT = "assistant"
     SYSTEM = "system"
@@ -34,12 +47,26 @@ class MsgRole(str, Enum):
 
 @dataclass
 class Message:
+    """工作记忆中的单条消息。
+
+    Args:
+        role: 消息来源角色。
+        content: 消息正文。
+        timestamp: 消息产生时间，默认使用当前本地时间。
+        metadata: 与消息关联的可选结构化元数据。
+    """
+
     role: MsgRole
     content: str
     timestamp: datetime = field(default_factory=datetime.now)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
+        """将消息序列化为可写入 Redis 的 JSON 兼容字典。
+
+        Returns:
+            包含角色、正文、ISO 时间戳和元数据的字典。
+        """
         return {
             "role": self.role.value,
             "content": self.content,
@@ -49,6 +76,18 @@ class Message:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Message":
+        """从 Redis 反序列化字典并恢复消息对象。
+
+        Args:
+            data: 包含角色、正文和时间戳的消息字典。
+
+        Returns:
+            还原后的 ``Message`` 实例。
+
+        Raises:
+            TypeError: 输入不是字典时抛出。
+            ValueError: 角色或时间戳格式不合法时抛出。
+        """
         if not isinstance(data, dict):
             raise TypeError("消息数据必须是对象")
         raw_timestamp = data.get("timestamp", data.get("ts"))
@@ -70,6 +109,8 @@ class Message:
 
 @dataclass
 class MemoryContext:
+    """供 Agent 使用的摘要、近期消息、情景历史和用户画像上下文。"""
+
     summary: str = ""
     recent_messages: List[Message] = field(default_factory=list)
     relevant_history: List[Any] = field(default_factory=list)
@@ -77,11 +118,27 @@ class MemoryContext:
 
     @staticmethod
     def _clean(value: Any) -> str:
+        """将上下文值转换为可安全拼接的 UTF-8 文本。
+
+        Args:
+            value: 任意待展示的上下文值。
+
+        Returns:
+            清理后的字符串。
+        """
         text = value if isinstance(value, str) else str(value)
         return text.encode("utf-8", errors="ignore").decode("utf-8")
 
     @classmethod
     def _history_text(cls, item: Any) -> str:
+        """将一条历史片段转换为提示词中的单行文本。
+
+        Args:
+            item: 消息对象、字典或其他历史片段。
+
+        Returns:
+            适合拼接到上下文提示词的文本。
+        """
         if isinstance(item, Message):
             return f"{item.role.value}: {cls._clean(item.content)}"
         if isinstance(item, dict):
@@ -89,6 +146,11 @@ class MemoryContext:
         return cls._clean(item)
 
     def to_prompt_text(self) -> str:
+        """按固定截断规则生成可直接提供给模型的上下文文本。
+
+        Returns:
+            依次包含摘要、最多 3 条相关历史、用户画像和最后 8 条消息的文本。
+        """
         parts: List[str] = []
         if self.summary:
             parts.append(f"[会话摘要]\n{self._clean(self.summary)}")
@@ -111,7 +173,10 @@ class MemoryContext:
 
 
 class MemoryManager:
-    """Redis-backed short-term working memory for the current conversation."""
+    """管理 ShopCare 的工作记忆、长程情景记忆和用户画像。
+
+    所有公共异步方法都将存储故障隔离在记忆层，避免影响主对话链路。
+    """
 
     WORKING_MAX = WORKING_MAX
     COMPRESS_AT = COMPRESS_AT
@@ -131,6 +196,17 @@ class MemoryManager:
         chroma_client: Any = None,
         model: Optional[str] = None,
     ) -> None:
+        """初始化 Redis、LLM 和 Chroma 依赖。
+
+        Args:
+            redis_client: 可注入的异步 Redis 客户端。
+            redis_url: 未注入客户端时使用的 Redis 地址。
+            llm_client: 可注入的 Anthropic 异步客户端。
+            episodic_collection: 可注入的情景记忆集合。
+            profile_collection: 可注入的用户画像集合。
+            chroma_client: 用于惰性创建集合的 Chroma 客户端。
+            model: 摘要与画像抽取使用的模型名称。
+        """
         if redis_client is None:
             try:
                 import redis.asyncio as redis
@@ -151,10 +227,28 @@ class MemoryManager:
 
     @staticmethod
     def _wm_key(user_id: str, conv_id: str) -> str:
+        """构造工作记忆 Redis key。
+
+        Args:
+            user_id: 用户标识。
+            conv_id: 会话标识。
+
+        Returns:
+            ``wm:{user_id}:{conv_id}`` 格式的 key。
+        """
         return f"wm:{user_id}:{conv_id}"
 
     @staticmethod
     def _summary_key(user_id: str, conv_id: str) -> str:
+        """构造会话摘要 Redis key。
+
+        Args:
+            user_id: 用户标识。
+            conv_id: 会话标识。
+
+        Returns:
+            ``summary:{user_id}:{conv_id}`` 格式的 key。
+        """
         return f"summary:{user_id}:{conv_id}"
 
     async def add_message(
@@ -165,7 +259,18 @@ class MemoryManager:
         content: str,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Write one message and return whether the compression entry point was reached."""
+        """异步写入一条工作记忆消息并返回是否达到压缩入口。
+
+        Args:
+            user_id: 用户标识。
+            conv_id: 会话标识。
+            role: 消息角色。
+            content: 消息正文。
+            metadata: 可选消息元数据。
+
+        Returns:
+            达到 15 条压缩阈值时返回 ``True``，写入失败或未达到时返回 ``False``。
+        """
         key = self._wm_key(str(user_id), str(conv_id))
         try:
             message = Message(
@@ -174,15 +279,16 @@ class MemoryManager:
                 metadata=dict(metadata or {}),
             )
             payload = message.to_dict()
-            # Keep the source Redis representation compatible with the original
-            # project while Message.to_dict exposes the explicit field name.
+            # Redis 继续使用原工程的 ts 字段，以兼容既有数据；Message 对外仍提供显式的 timestamp。
             payload["ts"] = payload.pop("timestamp")
             await self._redis.lpush(
                 key,
                 json.dumps(payload, ensure_ascii=False),
             )
+            # 一日 TTL 限制陈旧上下文的生命周期，避免无界累积带来存储和 Token 成本。
             await self._redis.expire(key, self.TTL_SECONDS)
             count = await self._redis.llen(key)
+            # 15 条是压缩入口：在上下文接近预算上限前先产生摘要并保留热消息。
             self.last_compression_triggered = count >= self.COMPRESS_AT
             self.compression_trigger_key = key if self.last_compression_triggered else None
             if self.last_compression_triggered:
@@ -205,7 +311,16 @@ class MemoryManager:
         conv_id: str,
         limit: int = WORKING_MAX,
     ) -> List[Message]:
-        """Read at most 20 messages and restore chronological order."""
+        """读取最多 20 条工作记忆并恢复为时间正序。
+
+        Args:
+            user_id: 用户标识。
+            conv_id: 会话标识。
+            limit: 调用方请求的条数，最终仍受 20 条硬上限约束。
+
+        Returns:
+            按时间先后排列的消息列表；Redis 故障时返回空列表。
+        """
         try:
             bounded_limit = min(self.WORKING_MAX, max(0, int(limit)))
         except (TypeError, ValueError):
@@ -229,13 +344,39 @@ class MemoryManager:
     async def _get_working_memory(
         self, user_id: str, conv_id: str, limit: int = WORKING_MAX
     ) -> List[Message]:
+        """提供内部统一的工作记忆读取入口。
+
+        Args:
+            user_id: 用户标识。
+            conv_id: 会话标识。
+            limit: 读取上限。
+
+        Returns:
+            按时间正序排列的消息列表。
+        """
         return await self.get_recent_messages(user_id, conv_id, limit)
 
     @staticmethod
     def _format_messages(messages: List[Message]) -> str:
+        """将消息列表格式化为摘要或画像抽取提示词文本。
+
+        Args:
+            messages: 待格式化的消息。
+
+        Returns:
+            每行一条 ``role: content`` 的纯文本。
+        """
         return "\n".join(f"{message.role.value}: {message.content}" for message in messages)
 
     async def _get_llm_client(self) -> Any:
+        """惰性创建并缓存 Anthropic 异步客户端。
+
+        Returns:
+            已注入或新建的异步 LLM 客户端。
+
+        Raises:
+            RuntimeError: Anthropic SDK 不可用时抛出。
+        """
         if self._llm_client is not None:
             return self._llm_client
         try:
@@ -247,6 +388,14 @@ class MemoryManager:
 
     @staticmethod
     def _extract_llm_text(response: Any) -> str:
+        """从 Anthropic 响应对象或兼容 Mock 中提取文本。
+
+        Args:
+            response: LLM SDK 响应对象。
+
+        Returns:
+            首个可用文本片段；没有文本时返回空字符串。
+        """
         content = getattr(response, "content", None)
         if isinstance(content, str):
             return content
@@ -263,6 +412,18 @@ class MemoryManager:
     async def _generate_summary(
         self, old_messages: List[Message], llm_client: Any = None
     ) -> str:
+        """调用 LLM 生成旧消息摘要，并限制在 800 字符内。
+
+        Args:
+            old_messages: 待归档的旧消息。
+            llm_client: 可选的异步 LLM 客户端。
+
+        Returns:
+            截断后的摘要文本。
+
+        Raises:
+            Exception: LLM 调用失败或未返回文本时交由上层确定性降级。
+        """
         client = llm_client or await self._get_llm_client()
         response = await client.messages.create(
             model=self._model,
@@ -289,13 +450,23 @@ class MemoryManager:
         conv_id: str,
         llm_client: Any = None,
     ) -> Optional[str]:
-        """Compress old working-memory messages and persist the episodic summary."""
+        """压缩旧工作记忆、写回摘要并异步安全保存情景记忆。
+
+        Args:
+            user_id: 用户标识。
+            conv_id: 会话标识。
+            llm_client: 可选的摘要 LLM 客户端。
+
+        Returns:
+            成功时返回摘要，未达到压缩阈值或检查失败时返回 ``None``。
+        """
         key = self._wm_key(str(user_id), str(conv_id))
         try:
             count = int(await self._redis.llen(key))
         except Exception as exc:
             logger.error("工作记忆压缩检查失败: %s", exc)
             return None
+        # 只有达到 15 条才进入压缩，避免过早摘要损失上下文并增加模型调用。
         if count < self.COMPRESS_AT:
             self.last_compression_triggered = False
             return None
@@ -303,6 +474,7 @@ class MemoryManager:
         messages = await self._get_working_memory(user_id, conv_id, self.WORKING_MAX)
         if len(messages) < self.COMPRESS_AT:
             return None
+        # 采用“旧消息归档、最新 5 条保留”的滑窗，平衡 Token 预算与即时上下文连贯性。
         old_messages = messages[: -self.KEEP_AFTER_COMPRESS]
         keep_messages = messages[-self.KEEP_AFTER_COMPRESS :]
         try:
@@ -322,12 +494,12 @@ class MemoryManager:
                 await self._redis.expire(summary_key, self.TTL_SECONDS)
 
             await self._redis.delete(key)
-            # LPUSH inserts at the head; replay chronological messages so the
-            # subsequent LRANGE + reverse path restores the original order.
+            # LPUSH 从头部插入；按时间正序回放，后续 LRANGE + reverse 才能恢复原始顺序。
             for message in keep_messages:
                 payload = message.to_dict()
                 payload["ts"] = payload.pop("timestamp")
                 await self._redis.lpush(key, json.dumps(payload, ensure_ascii=False))
+            # 压缩后的热记忆仍保持一日 TTL，避免摘要重置后绕过生命周期约束。
             await self._redis.expire(key, self.TTL_SECONDS)
             self.last_compression_triggered = True
             self.compression_trigger_key = key
@@ -347,6 +519,11 @@ class MemoryManager:
         return summary
 
     def _get_episodic_collection(self) -> Any:
+        """同步解析或创建 ``episodic`` Chroma 集合。
+
+        Returns:
+            Chroma collection；依赖不可用或初始化失败时返回 ``None``。
+        """
         if self._episodic is not None:
             return self._episodic
         if self._chroma_client is not None:
@@ -374,10 +551,19 @@ class MemoryManager:
         return self._episodic
 
     async def _resolve_episodic_collection(self) -> Any:
-        """Resolve Chroma lazily without blocking the event loop."""
+        """在线程中惰性解析情景集合，避免同步 Chroma 阻塞事件循环。
+
+        Returns:
+            ``episodic`` 集合或 ``None``。
+        """
         return await asyncio.to_thread(self._get_episodic_collection)
 
     def _get_profile_collection(self) -> Any:
+        """同步解析或创建 ``user_profile`` Chroma 集合。
+
+        Returns:
+            Chroma collection；依赖不可用或初始化失败时返回 ``None``。
+        """
         if self._profile is not None:
             return self._profile
         if self._chroma_client is not None:
@@ -405,11 +591,26 @@ class MemoryManager:
         return self._profile
 
     async def _resolve_profile_collection(self) -> Any:
-        """Resolve the profile collection off the event loop."""
+        """在线程中解析用户画像集合，避免同步 Chroma 阻塞事件循环。
+
+        Returns:
+            ``user_profile`` 集合或 ``None``。
+        """
         return await asyncio.to_thread(self._get_profile_collection)
 
     @staticmethod
     def _validate_profile_data(data: Any) -> Dict[str, Any]:
+        """校验并复制画像 JSON，阻止畸形数据覆盖已有画像。
+
+        Args:
+            data: LLM 返回或 Chroma 读取的候选画像。
+
+        Returns:
+            只包含字符串列表的 ``preferences`` 与 ``entities`` 字典。
+
+        Raises:
+            ValueError: 画像缺少必需字段或字段类型不符合契约。
+        """
         if not isinstance(data, dict):
             raise ValueError("用户画像必须是 JSON 对象")
         preferences = data.get("preferences")
@@ -425,8 +626,7 @@ class MemoryManager:
                 not isinstance(item, str) for item in values
             ):
                 raise ValueError("用户画像 entities 的值必须是字符串数组")
-        # Copy only the validated JSON-compatible shape so callers cannot
-        # mutate the object after it has been accepted for persistence.
+        # 只复制已校验的 JSON 结构，避免调用方在持久化后通过可变对象篡改画像。
         return {
             "preferences": list(preferences),
             "entities": {key: list(values) for key, values in entities.items()},
@@ -434,6 +634,14 @@ class MemoryManager:
 
     @staticmethod
     def _profile_prompt(messages: List[Message]) -> str:
+        """构造用户画像抽取提示词，要求模型只返回严格 JSON。
+
+        Args:
+            messages: 最近的工作记忆消息。
+
+        Returns:
+            包含固定画像 schema 和消息文本的提示词。
+        """
         return (
             "请从以下最近对话中提取用户画像，只返回严格 JSON，不要添加 Markdown 或解释。\n"
             "JSON 结构必须为：{\"preferences\":[\"...\"],\"entities\":{"
@@ -450,7 +658,16 @@ class MemoryManager:
         conv_id: str,
         llm_client: Any = None,
     ) -> None:
-        """Extract and persist a profile; safe for fire-and-forget tasks."""
+        """异步提取并持久化用户画像，适合由 ``asyncio.create_task`` 后台触发。
+
+        Args:
+            user_id: 用户标识。
+            conv_id: 当前会话标识。
+            llm_client: 可选的画像抽取 LLM 客户端。
+
+        Returns:
+            无返回值；任何异常都会在方法内部隔离。
+        """
         try:
             messages = await self._get_working_memory(user_id, conv_id, limit=10)
             if not messages:
@@ -492,11 +709,18 @@ class MemoryManager:
                     await asyncio.to_thread(delete, ids=[document_id])
                 await asyncio.to_thread(collection.add, **values)
         except Exception as exc:
-            # This method is designed for asyncio.create_task and must never
-            # turn a background profile failure into a chat request failure.
+            # 该协程由 asyncio.create_task 后台执行；吞掉异常是为了防止画像失败冒泡导致用户白屏。
             logger.warning("用户画像异步更新失败: %s", exc)
 
     async def get_user_profile(self, user_id: str) -> Dict[str, Any]:
+        """读取用户画像并在缺失或异常时返回空结构。
+
+        Args:
+            user_id: 用户标识。
+
+        Returns:
+            包含 ``preferences`` 和 ``entities`` 的画像字典。
+        """
         default = {"preferences": [], "entities": {}}
         try:
             collection = await self._resolve_profile_collection()
@@ -525,6 +749,17 @@ class MemoryManager:
         summary: str,
         full_text: str,
     ) -> Optional[str]:
+        """将摘要及前序对话片段写入 ``episodic`` 集合。
+
+        Args:
+            user_id: 用户标识。
+            conv_id: 会话标识。
+            summary: 压缩后的摘要文本。
+            full_text: 摘要对应的原始对话文本。
+
+        Returns:
+            新建文档 ID；集合不可用时返回 ``None``。
+        """
         collection = await self._resolve_episodic_collection()
         if collection is None:
             return None
@@ -547,10 +782,19 @@ class MemoryManager:
 
     @staticmethod
     def _normalise_chroma_result(result: Any) -> List[Dict[str, Any]]:
+        """把 Chroma 的嵌套或扁平返回统一为记录列表。
+
+        Args:
+            result: Chroma ``query`` 或 ``get`` 返回值。
+
+        Returns:
+            每条记录包含 id、document、metadata 和 distance 的列表。
+        """
         if not isinstance(result, dict):
             return []
 
         def first(value: Any) -> List[Any]:
+            """展开 Chroma 单查询结果常见的二维外层列表。"""
             if isinstance(value, list) and value and isinstance(value[0], list):
                 return value[0]
             return value if isinstance(value, list) else []
@@ -573,6 +817,17 @@ class MemoryManager:
         return items
 
     async def _query_episodic(self, collection: Any, where: Dict[str, str], query: Optional[str], limit: int) -> Any:
+        """在线程中执行一次带过滤条件的情景记忆查询。
+
+        Args:
+            collection: Chroma 情景集合。
+            where: 用户或会话过滤条件。
+            query: 可选语义检索文本。
+            limit: 本次最多召回条数。
+
+        Returns:
+            Chroma 原始查询结果。
+        """
         kwargs: Dict[str, Any] = {"where": where, "n_results": limit}
         kwargs["query_texts"] = [query or ""]
         return await asyncio.to_thread(collection.query, **kwargs)
@@ -584,6 +839,17 @@ class MemoryManager:
         query: Optional[str] = None,
         limit: int = HISTORY_TOP_K,
     ) -> List[Dict[str, Any]]:
+        """按同会话优先、同用户补足的顺序召回情景记忆。
+
+        Args:
+            user_id: 用户标识。
+            conv_id: 当前会话标识。
+            query: 可选的语义检索文本。
+            limit: 返回条数，最终受 5 条上限约束。
+
+        Returns:
+            去重后的情景记忆记录；Chroma 异常时返回空列表。
+        """
         try:
             bounded_limit = min(self.HISTORY_TOP_K, max(0, int(limit)))
         except (TypeError, ValueError):
@@ -621,6 +887,7 @@ class MemoryManager:
             return []
 
     async def close(self) -> None:
+        """关闭 Redis 客户端（兼容 ``aclose`` 与 ``close`` 两种 API）。"""
         close_method = getattr(self._redis, "aclose", None)
         if close_method is None:
             close_method = getattr(self._redis, "close", None)
