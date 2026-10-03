@@ -32,6 +32,13 @@
 - 提交前检查 `git status`、`git diff`、测试结果和实际影响范围。
 - GitHub 目标仓库为 `https://github.com/sheily899/ShopCare.git`。当前目录尚未初始化 Git 仓库；首次施工前先确认本地仓库与该 remote 的连接方式。默认先完成本地 commit，只有在明确具备推送授权且需要远端同步时才执行 push。
 
+## 代码注释规范（铁律）
+
+1. 每个新建的 Python 文件顶部，必须包含 Module Docstring，说明该文件的架构职责与边界。
+2. 所有公共类与异步函数，必须使用标准 Google Style Docstring，详细注明 Args、Returns 与业务逻辑概述。
+3. 凡涉及业务阈值（如 0.5、0.45、0.8、15、86400）、状态机跳转分支、异常吞噬（try...except pass）的代码行，必须在上方添加 Inline 注释，解释“为什么这么定（Why）”。
+4. 严禁出现无意义的废话注释（如 `# 定义变量`）。
+
 ## 文档与交流
 
 - 默认使用中文；技术名词保留英文原文。
