@@ -155,4 +155,15 @@ Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 已完成，St
 | `mcp/tool_manager.py` | 提供 `Tool`/`ToolResult`/`ToolStats` dataclass 契约；按 Cache → Breaker → 参数校验 → `asyncio.wait_for` → 统计/状态更新 → fallback 或成功缓存的顺序执行工具。使用标准库 `OrderedDict` 实现 5000 条容量、1250 条批量淘汰和 TTL；实现 5 次失败、60 秒冷却、半开探测的三态熔断。 |
 | `tests/test_tool_manager_circuit.py` | 覆盖五次失败、60 秒恢复、半开探测失败、超时、参数校验不污染熔断、TTL 命中、5000/1250 淘汰和 fallback 保留原 error。异步测试使用标准库 `asyncio.run`，未新增 pytest 插件依赖。 |
 
-验证：Step 4.2 专项测试 `7 passed`；全量 pytest `95 passed`。Step 4.3 的 Query Rewrite/并行召回和 Step 4.4 的 LLM Rerank 尚未开始。
+验证：Step 4.2 专项测试 `7 passed`；全量 pytest `95 passed`。Step 4.3 已在后续完成，Step 4.4 的 LLM Rerank 尚未开始。
+
+## Step 4.3：Query Rewrite、并行召回与稳定去重
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `mcp/tool_manager.py` | 在既有 Tool/缓存/熔断边界上增加可注入 Anthropic client、`rewrite_query(query, n=3)` 与 `search_with_rewrite(...)`；改写固定使用 `temperature=0.3`、`max_tokens=256`，不携带 history/context；每路以 `recall_k=max(top_k,5)` 并发调用基础工具，并通过 `return_exceptions=True` 隔离局部召回异常。 |
+| `tests/test_tool_manager_reasoning.py` | 使用 fake Anthropic client 和 fake Tool handler 覆盖改写参数、JSON/fenced JSON 解析、异常回退、并发启动、recall_k、局部失败、全失败和多级稳定 identity 去重。 |
+
+去重优先级固定为 `source_chunk_id`、`content_hash`、`runtime_id`、content SHA256；同一 identity 保留较高 score，不同 identity 保留首次出现顺序，无 identity 的结果不强行合并。Step 4.3 返回完整去重候选集，不执行最终 Top-K、不调用 Rerank，也不设置 score threshold。
+
+验证：Step 4.3 专项测试 `9 passed`；Step 4.2 回归 `7 passed`；全量 pytest `104 passed`；compileall 与 `git diff --check` 通过。Step 4.4 LLM Rerank 仍未开始。

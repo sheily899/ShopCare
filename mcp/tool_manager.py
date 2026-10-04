@@ -1,8 +1,8 @@
-"""ShopCare 工具执行基础设施。
+"""ShopCare 工具与 RAG 召回前处理基础设施。
 
-本模块属于 MCP/RAG 治理层，仅负责工具契约、参数校验、超时隔离、内存缓存、
-熔断状态机和 fallback 语义。它不实现 Query Rewrite、并行召回、LLM Rerank，
-也不连接真实订单、支付、退款或人工工单系统。
+本模块属于 MCP/RAG 治理层，负责工具契约、参数校验、超时隔离、内存缓存、
+熔断状态机、fallback、Query Rewrite、并行召回和稳定去重。LLM Rerank、
+真实订单/支付/退款写操作和人工工单系统不属于本模块当前阶段边界。
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -270,13 +270,14 @@ class _CacheEntry:
 
 
 class MCPToolManager:
-    """编排工具注册、校验、缓存、超时、熔断、统计和 fallback。
+    """编排工具注册、治理能力和 RAG 召回前处理。
 
     Args:
-        api_key: 为兼容后续 LLM 扩展保留的可选参数；Step 4.2 不创建 LLM 客户端。
+        api_key: Anthropic API key；仅在实际执行 Query Rewrite 时惰性创建客户端。
         base_url: 为兼容后续 LLM 扩展保留的可选参数。
-        model: 为兼容后续 LLM 扩展保留的可选模型名。
+        model: 为 Query Rewrite 使用的可选模型名。
         clock: 可注入的单调时钟，用于稳定测试 TTL 和熔断冷却。
+        client: 可选的异步 Anthropic 客户端，主要用于离线测试和依赖注入。
 
     Returns:
         无；通过 ``call``/``execute`` 执行已注册工具。
@@ -292,10 +293,12 @@ class MCPToolManager:
         base_url: Optional[str] = None,
         model: Optional[str] = None,
         clock: Callable[[], float] = time.monotonic,
+        client: Optional[Any] = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
+        self._client = client
         self._clock = clock
         self._tools: Dict[str, Tool] = {}
         self._cache: "OrderedDict[str, _CacheEntry]" = OrderedDict()
@@ -640,3 +643,210 @@ class MCPToolManager:
             }
             for name, tool in self._tools.items()
         }
+
+    async def rewrite_query(self, query: str, n: int = 3) -> List[str]:
+        """将原始知识检索 query 改写为多个角度并保留原 query。
+
+        Args:
+            query: 用户原始检索问题；该文本始终作为返回列表第一项。
+            n: LLM 最多生成的改写数量，默认 3。
+
+        Returns:
+            去重后的 query 列表；模型不可用或输出非法时只返回原始 query。
+
+        业务逻辑：改写只使用当前 query，不携带会话历史或用户画像，避免
+        将私有上下文扩散到知识库检索；失败时确定性回退，保证主链路可继续。
+        """
+        original_query = str(query or "")
+        try:
+            rewrite_count = int(n)
+        except (TypeError, ValueError):
+            rewrite_count = 0
+        if rewrite_count <= 0:
+            return [original_query]
+
+        client = self._get_llm_client()
+        if client is None:
+            logger.warning("查询改写不可用，使用原始 query")
+            return [original_query]
+
+        # Why：固定 n=3 是改写召回覆盖率与额外 LLM/检索成本之间的边界，
+        # 不携带 history/context 可避免会话隐私污染公共知识检索。
+        prompt = (
+            f"将以下用户查询改写为 {rewrite_count} 个不同角度的搜索子查询，用于检索知识库。\n"
+            "要求：每个子查询角度不同，覆盖原始问题的不同方面；只返回 JSON 对象，"
+            f"格式为 {{\"queries\": [\"子查询1\", \"子查询2\"]}}，最多返回 {rewrite_count} 条。\n"
+            f"原始查询：{original_query}"
+        )
+        try:
+            response = await client.messages.create(
+                model=self.model or "claude-3-5-sonnet-20241022",
+                max_tokens=256,
+                temperature=0.3,
+                extra_body={
+                    "thinking": {"type": "disabled"},
+                    "response_format": {"type": "json_object"},
+                },
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = self._extract_text_content(getattr(response, "content", None))
+            payload = self._parse_json_text(raw)
+            queries = payload.get("queries") if isinstance(payload, dict) else None
+            if (
+                not isinstance(queries, list)
+                or not queries
+                or len(queries) > rewrite_count
+                or any(not isinstance(item, str) or not item.strip() for item in queries)
+            ):
+                raise ValueError("查询改写结果必须是非空字符串数组，且不超过指定数量")
+
+            # Why：保留原始 query 可防止改写遗漏关键实体；dict 顺序同时保证结果稳定。
+            normalized = [item.strip() for item in queries]
+            return list(dict.fromkeys([original_query] + normalized))
+        except Exception as exc:
+            logger.warning("查询改写失败，使用原始 query：%s", exc)
+            return [original_query]
+
+    async def search_with_rewrite(
+        self,
+        tool_name: str,
+        query: str,
+        top_k: int = 5,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> ToolResult:
+        """执行 Query Rewrite、并行召回和稳定去重，不执行 Rerank。
+
+        Args:
+            tool_name: 已注册的知识检索工具名。
+            query: 用户原始检索问题。
+            top_k: 下游希望的结果规模；每路召回至少使用 5 条。
+            context: 传给底层 Tool handler 的可选上下文。
+
+        Returns:
+            ``ToolResult``；成功时 data 是完整去重候选集，失败时 data 为空列表。
+
+        业务逻辑：所有改写 query 通过 ``asyncio.gather`` 并行调用基础 Tool，
+        单路错误局部隔离；本阶段不按 score 截断，最终排序和 Top-K 留给后续 Rerank。
+        """
+        sub_queries = await self.rewrite_query(query, n=3)
+        # Why：至少召回 5 条候选才能为后续去重和 Rerank 留出足够覆盖面。
+        recall_k = max(int(top_k), 5)
+        tasks = [
+            self.call(
+                tool_name,
+                {"query": sub_query, "top_k": recall_k},
+                context,
+                use_cache=True,
+            )
+            for sub_query in sub_queries
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        merged_by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        merged_order: List[Tuple[str, str]] = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning("子查询召回异常，跳过该路：%s", result)
+                continue
+            if not isinstance(result, ToolResult) or not result.success or not isinstance(result.data, list):
+                continue
+            for item in result.data:
+                if not isinstance(item, dict):
+                    continue
+                key = self._retrieval_item_key(item, len(merged_order))
+                if key not in merged_by_key:
+                    merged_order.append(key)
+                    merged_by_key[key] = item
+                elif self._item_score(item) > self._item_score(merged_by_key[key]):
+                    merged_by_key[key] = item
+
+        merged = [merged_by_key[key] for key in merged_order]
+        if not merged:
+            return ToolResult(
+                name=tool_name,
+                success=False,
+                data=[],
+                error="所有子查询均无结果",
+                metadata={"original_query": query, "queries": sub_queries, "recall_k": recall_k},
+            )
+
+        return ToolResult(
+            name=tool_name,
+            success=True,
+            data=merged,
+            reranked=False,
+            rerank_degraded=False,
+            metadata={
+                "original_query": query,
+                "queries": sub_queries,
+                "recall_k": recall_k,
+                "candidate_count": len(merged),
+            },
+        )
+
+    def _get_llm_client(self) -> Optional[Any]:
+        """惰性获取 Anthropic client；无 key 时不创建网络客户端。"""
+        if self._client is not None:
+            return self._client
+        if not self.api_key:
+            return None
+        try:
+            from anthropic import AsyncAnthropic
+
+            kwargs: Dict[str, Any] = {"api_key": self.api_key}
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+            self._client = AsyncAnthropic(**kwargs)
+            return self._client
+        except Exception as exc:
+            logger.warning("Anthropic client 初始化失败：%s", exc)
+            return None
+
+    @staticmethod
+    def _extract_text_content(content: Any) -> str:
+        """从 Anthropic 文本 block 或测试替身中提取文本。"""
+        if isinstance(content, str):
+            return content
+        blocks = content if isinstance(content, list) else [content]
+        texts: List[str] = []
+        for block in blocks:
+            if isinstance(block, dict) and block.get("type") == "text":
+                texts.append(str(block.get("text") or ""))
+            elif getattr(block, "type", None) == "text":
+                texts.append(str(getattr(block, "text", "") or ""))
+        return "\n".join(texts).strip()
+
+    @staticmethod
+    def _parse_json_text(raw: str) -> Any:
+        """解析普通 JSON 或 Markdown fenced JSON 文本。"""
+        text = str(raw or "").strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        return json.loads(text)
+
+    @staticmethod
+    def _retrieval_item_key(item: Dict[str, Any], fallback_index: int) -> Tuple[str, str]:
+        """按稳定字段优先级生成检索候选 identity。"""
+        for field_name in ("source_chunk_id", "content_hash", "runtime_id"):
+            value = item.get(field_name)
+            if value not in (None, ""):
+                return field_name, str(value)
+        content = item.get("content")
+        if content not in (None, ""):
+            digest = hashlib.sha256(str(content).encode("utf-8")).hexdigest()
+            return "content_hash", digest
+        # 无 identity 的候选不能互相合并，否则可能误删不同来源的结果。
+        return "unidentified", str(fallback_index)
+
+    @staticmethod
+    def _item_score(item: Dict[str, Any]) -> float:
+        """读取候选 score，仅用于同一 identity 的较高分代表选择。"""
+        try:
+            return float(item.get("score", float("-inf")))
+        except (TypeError, ValueError):
+            return float("-inf")

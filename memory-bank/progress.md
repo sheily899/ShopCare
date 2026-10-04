@@ -135,7 +135,7 @@
 - 验证：知识库专项测试 → `11 passed`；Header-Aware 专项断言六篇文档生成 18 个 chunk、最大 244 字符并聚焦 401 片段；全量 pytest → `88 passed`；脚本 `--help`、compileall 与 `git diff --check` 通过。
 - 回归修复：HTTP Chroma 失败后的 PersistentClient fallback 改为使用独立的 `SegmentAPI` Settings，避免复用被 `HttpClient` 原地改写的 FastAPI 配置；真实 0.5.23 客户端已验证可从 `localhost:8000` 的 404 回退到本地目录。
 - 本地模型复用：从 Lenovo RAG 模块复制可加载的 BGE Small 中文模型到 `models/BAAI/bge-small-zh-v1.5`（约 192 MB）；当前运行时通过 `CUSTOMEROPS_EMBEDDING_MODEL` 指向该目录，CPU 生成 512 维向量，已完成 6 篇文档、18 个 chunk 的实际入库与 `401 认证失败` 检索验证。模型二进制仅作为本机运行时资产，不提交 Git。
-- 边界：未实现 Query Rewrite、并行召回或 Rerank；Step 4.2 的 ToolManager、缓存与 CircuitBreaker 已完成，下一步等待进入 Step 4.3。
+- 边界：Step 4.3 的 Query Rewrite、并行召回与去重已完成；LLM Rerank 仍留待 Step 4.4。
 
 ## Step 4.2：Tool、缓存与 Circuit Breaker
 
@@ -147,3 +147,13 @@
 - 调用顺序：Cache 查询、Breaker 判定、required/type/additionalProperties 校验、`asyncio.wait_for`、统计与熔断更新、fallback 或成功缓存；fallback 成功仍保留主 handler 的 `error`。
 - 验证：`.venv\Scripts\python.exe -m pytest -q tests/test_tool_manager_circuit.py` → `7 passed`；全量 pytest → `95 passed`。
 - 边界：未实现 Query Rewrite、并行召回、去重编排和 LLM Rerank，未接入真实外部业务写操作。
+
+## Step 4.3：Query Rewrite、并行召回与稳定去重
+
+- 状态：已完成，等待人工确认后再进入 Step 4.4。
+- 修改：扩展 `mcp/tool_manager.py`，增加可注入 Anthropic client、Query Rewrite、并行召回和多级稳定 identity 去重；新增 `tests/test_tool_manager_reasoning.py`。
+- Query Rewrite：保留原始 query；LLM 最多生成 3 条改写；固定 `temperature=0.3`、`max_tokens=256`，不传 history、MemoryContext 或用户画像；返回非法或异常时回退为原始 query。
+- 并行召回：按 `recall_k=max(top_k,5)` 为每个 query 调用现有 Tool，使用 `asyncio.gather(..., return_exceptions=True)`，单路异常不阻断其他成功召回。
+- 去重：按 `source_chunk_id -> content_hash -> runtime_id -> content SHA256` 生成稳定 identity；同一 identity 保留较高 score，缺失 identity 的候选独立保留；不添加 score threshold，不进行最终排序或 Top-K 截断。
+- 边界：`ToolResult.reranked=False`、`rerank_degraded=False`；未实现 Step 4.4 LLM Rerank、Cross-Encoder 或真实外部业务写操作。
+- 验证：Step 4.3 专项 `.venv\Scripts\python.exe -m pytest -q tests/test_tool_manager_reasoning.py` → `9 passed`；Step 4.2 回归 → `7 passed`；全量 pytest → `104 passed`；compileall 与 `git diff --check` 通过。
