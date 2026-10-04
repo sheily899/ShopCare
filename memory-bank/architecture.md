@@ -189,3 +189,14 @@ Rerank 只消费 Step 4.3 已完成去重的候选列表，不引入 Cross-Encod
 本阶段只建立通用只读工具层，未实现 Technical/Billing/Escalation 工具、Agent profile 或真实业务写操作；Step 5.2 继续保持未开始状态。
 
 验证：Step 5.1 专项测试 `5 passed`；全量 pytest `114 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+
+## Step 5.2：Technical 与 Billing 专属工具
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `agents/tools.py` | 增加 `lookup_error_code` 静态错误码目录与 `server_log_checked=False` 声明；增加 `build_diagnostic_plan` 低风险步骤生成；增加 `check_billing_fields` 字段完整度检查与固定 `can_confirm_refund=False`；增加 `compare_amounts` 纯数学差值；为 Technical/Billing 工具分别提供 JSON Schema、`AgentToolSpec` 和注册表工厂。 |
+| `tests/test_agent_tools_domain.py` | 验证 401/403/404/500 静态解释、未知码与非法入参、低风险诊断步骤、账单字段缺失/完整两条路径、退款安全标志、金额算术和工具 schema。 |
+
+本阶段不读取真实服务端日志、不调用订单或支付系统、不确认退款，也不对重复扣款作法律定性；Escalation 工具和 Agent profile 留待后续步骤。
+
+验证：Step 5.2 专项测试 `9 passed`；Step 5.1/5.2 回归 `14 passed`；全量 pytest `123 passed`；`compileall agents tests` 与 `git diff --check` 通过。

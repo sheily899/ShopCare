@@ -11,6 +11,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import inspect
+import math
+from numbers import Real
 from typing import Any, Callable, Dict, Mapping, Optional
 
 
@@ -224,6 +226,212 @@ async def suggest_required_fields(
     }
 
 
+_ERROR_CODE_CATALOG: Dict[str, Dict[str, Any]] = {
+    "401": {
+        "meaning": "认证失败：登录凭证缺失、过期或无效。",
+        "suggestions": ["确认账号仍处于登录状态", "重新登录后重试"],
+    },
+    "403": {
+        "meaning": "权限不足：当前账号无权访问该资源。",
+        "suggestions": ["确认账号与目标资源匹配", "联系管理员核对访问权限"],
+    },
+    "404": {
+        "meaning": "资源不存在：请求的页面或接口路径未找到。",
+        "suggestions": ["检查访问链接是否完整", "返回上一页后重新打开"],
+    },
+    "500": {
+        "meaning": "服务器内部错误：服务处理请求时发生异常。",
+        "suggestions": ["记录发生时间与操作步骤", "稍后重试并保留错误截图"],
+    },
+    "400": {
+        "meaning": "请求参数无效：提交的数据未通过格式校验。",
+        "suggestions": ["检查必填字段和输入格式", "移除无效字符后重试"],
+    },
+    "429": {
+        "meaning": "请求过于频繁：当前访问触发了频率限制。",
+        "suggestions": ["等待片刻后重试", "避免短时间重复提交"],
+    },
+}
+
+
+async def lookup_error_code(params: Any) -> Dict[str, Any]:
+    """根据静态状态码目录返回低风险排查建议。
+
+    Args:
+        params: 必须包含 ``error_code: str`` 的工具参数对象。
+
+    Returns:
+        包含状态码含义、静态建议和 ``server_log_checked=False`` 的字典；参数
+        错误时返回安全错误结果。该方法不读取服务端日志。
+    """
+
+    base = {"server_log_checked": False, "source": "static_catalog"}
+    if not isinstance(params, dict):
+        return {**base, **_error("工具参数必须是对象")}
+    raw_code = params.get("error_code")
+    if not isinstance(raw_code, str) or not raw_code.strip():
+        return {**base, **_error("error_code 必须是非空字符串")}
+
+    code = raw_code.strip().upper().removeprefix("HTTP ").strip()
+    entry = _ERROR_CODE_CATALOG.get(code)
+    if entry is None:
+        return {
+            **base,
+            "success": True,
+            "error_code": code,
+            "meaning": "未知状态码：当前静态目录没有该状态码的解释。",
+            "suggestions": ["提供完整错误信息和发生步骤", "不要将本结果视为后台日志结论"],
+        }
+    return {
+        **base,
+        "success": True,
+        "error_code": code,
+        "meaning": entry["meaning"],
+        "suggestions": list(entry["suggestions"]),
+    }
+
+
+async def build_diagnostic_plan(params: Any) -> Dict[str, Any]:
+    """根据症状生成不改变系统状态的低风险排查计划。
+
+    Args:
+        params: 包含 ``symptom: str`` 和可选 ``device_type: str`` 的参数对象。
+
+    Returns:
+        包含结构化 ``steps`` 列表的排查计划。所有步骤均标记为 low risk，且不
+        执行系统重置、删除数据或其他高危操作。
+    """
+
+    if not isinstance(params, dict):
+        return _error("工具参数必须是对象")
+    symptom = params.get("symptom")
+    device_type = params.get("device_type")
+    if not isinstance(symptom, str) or not symptom.strip():
+        return _error("symptom 必须是非空字符串")
+    if device_type is not None and not isinstance(device_type, str):
+        return _error("device_type 必须是字符串或省略")
+
+    steps = [
+        {
+            "step": 1,
+            "action": "记录完整错误提示、发生时间和复现步骤",
+            "reason": "为后续人工或技术排查保留事实信息",
+            "risk": "low",
+        },
+        {
+            "step": 2,
+            "action": "检查网络连接并在稳定网络下重试",
+            "reason": "排除临时网络波动影响",
+            "risk": "low",
+        },
+        {
+            "step": 3,
+            "action": "清理应用缓存后重新打开当前页面",
+            "reason": "排除本地缓存导致的加载异常",
+            "risk": "low",
+        },
+        {
+            "step": 4,
+            "action": "完全退出应用并重新启动",
+            "reason": "刷新当前会话与临时资源",
+            "risk": "low",
+        },
+    ]
+    return {
+        "success": True,
+        "symptom": symptom.strip(),
+        "device_type": device_type.strip() if isinstance(device_type, str) else None,
+        "steps": steps,
+        "high_risk_action": False,
+    }
+
+
+_BILLING_FIELDS = ("order_id", "amount", "date", "payment_channel")
+
+
+async def check_billing_fields(params: Any) -> Dict[str, Any]:
+    """检查账单核验所需字段是否齐全，不执行退款或支付操作。
+
+    Args:
+        params: 可选的 ``order_id``、``amount``、``date`` 和
+            ``payment_channel`` 字符串字段。
+
+    Returns:
+        包含字段状态、缺失字段和固定 ``can_confirm_refund=False`` 的字典。
+        该结果只表示信息完整度，不代表退款成功或后台已核验。
+    """
+
+    if not isinstance(params, dict):
+        return {"can_confirm_refund": False, **_error("工具参数必须是对象")}
+    values: Dict[str, Optional[str]] = {}
+    for field_name in _BILLING_FIELDS:
+        value = params.get(field_name)
+        if value is not None and not isinstance(value, str):
+            return {
+                "can_confirm_refund": False,
+                **_error(f"{field_name} 必须是字符串或省略"),
+            }
+        values[field_name] = value.strip() if isinstance(value, str) else None
+
+    missing_fields = [name for name, value in values.items() if not value]
+    field_status = {name: bool(value) for name, value in values.items()}
+    return {
+        "success": True,
+        "fields": values,
+        "field_status": field_status,
+        "missing_fields": missing_fields,
+        "complete": not missing_fields,
+        # 账单工具只能检查输入完整度，绝不越权确认退款结果。
+        "can_confirm_refund": False,
+        "read_only": True,
+    }
+
+
+async def compare_amounts(params: Any) -> Dict[str, Any]:
+    """计算预期金额与实际金额的差值和大小关系。
+
+    Args:
+        params: 包含 ``expected_amount`` 与 ``actual_amount`` 数值字段的对象。
+
+    Returns:
+        包含原值、``difference``（实际值减预期值）和 comparison 的字典；非法
+        数值返回安全错误。该方法不推断重复扣款或其他法律结论。
+    """
+
+    if not isinstance(params, dict):
+        return _error("工具参数必须是对象")
+    expected = params.get("expected_amount")
+    actual = params.get("actual_amount")
+    if (
+        isinstance(expected, bool)
+        or isinstance(actual, bool)
+        or not isinstance(expected, Real)
+        or not isinstance(actual, Real)
+    ):
+        return _error("expected_amount 和 actual_amount 必须是数值")
+
+    expected_value = float(expected)
+    actual_value = float(actual)
+    if not math.isfinite(expected_value) or not math.isfinite(actual_value):
+        return _error("金额必须是有限数值")
+    difference = actual_value - expected_value
+    comparison = (
+        "actual_higher"
+        if difference > 0
+        else "actual_lower"
+        if difference < 0
+        else "equal"
+    )
+    return {
+        "success": True,
+        "expected_amount": expected_value,
+        "actual_amount": actual_value,
+        "difference": difference,
+        "comparison": comparison,
+        "read_only": True,
+    }
+
+
 INSPECT_REQUEST_CONTEXT_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {},
@@ -269,4 +477,102 @@ def general_tools() -> Dict[str, AgentToolSpec]:
     """
 
     return dict(GENERAL_TOOLS)
+
+
+LOOKUP_ERROR_CODE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {"error_code": {"type": "string"}},
+    "required": ["error_code"],
+    "additionalProperties": False,
+}
+
+BUILD_DIAGNOSTIC_PLAN_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "symptom": {"type": "string"},
+        "device_type": {"type": "string"},
+    },
+    "required": ["symptom"],
+    "additionalProperties": False,
+}
+
+CHECK_BILLING_FIELDS_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "order_id": {"type": "string"},
+        "amount": {"type": "string"},
+        "date": {"type": "string"},
+        "payment_channel": {"type": "string"},
+    },
+    "required": [],
+    "additionalProperties": False,
+}
+
+COMPARE_AMOUNTS_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "expected_amount": {"type": "number"},
+        "actual_amount": {"type": "number"},
+    },
+    "required": ["expected_amount", "actual_amount"],
+    "additionalProperties": False,
+}
+
+LOOKUP_ERROR_CODE_TOOL = make_tool(
+    "lookup_error_code",
+    "根据静态目录解释常见错误码并给出低风险建议，不读取服务端日志。",
+    LOOKUP_ERROR_CODE_SCHEMA,
+    lookup_error_code,
+)
+
+BUILD_DIAGNOSTIC_PLAN_TOOL = make_tool(
+    "build_diagnostic_plan",
+    "根据技术症状生成只读、低风险的分步排查计划。",
+    BUILD_DIAGNOSTIC_PLAN_SCHEMA,
+    build_diagnostic_plan,
+)
+
+CHECK_BILLING_FIELDS_TOOL = make_tool(
+    "check_billing_fields",
+    "检查账单核验字段是否齐全，不确认退款、不调用支付系统。",
+    CHECK_BILLING_FIELDS_SCHEMA,
+    check_billing_fields,
+)
+
+COMPARE_AMOUNTS_TOOL = make_tool(
+    "compare_amounts",
+    "只计算预期金额与实际金额的数学差值，不做业务或法律定性。",
+    COMPARE_AMOUNTS_SCHEMA,
+    compare_amounts,
+)
+
+TECHNICAL_TOOLS: Dict[str, AgentToolSpec] = {
+    LOOKUP_ERROR_CODE_TOOL.name: LOOKUP_ERROR_CODE_TOOL,
+    BUILD_DIAGNOSTIC_PLAN_TOOL.name: BUILD_DIAGNOSTIC_PLAN_TOOL,
+}
+
+BILLING_TOOLS: Dict[str, AgentToolSpec] = {
+    CHECK_BILLING_FIELDS_TOOL.name: CHECK_BILLING_FIELDS_TOOL,
+    COMPARE_AMOUNTS_TOOL.name: COMPARE_AMOUNTS_TOOL,
+}
+
+
+def technical_tools() -> Dict[str, AgentToolSpec]:
+    """返回 Technical 专属工具注册表的浅拷贝。
+
+    Returns:
+        以工具名为 key 的 Technical 工具字典。
+    """
+
+    return dict(TECHNICAL_TOOLS)
+
+
+def billing_tools() -> Dict[str, AgentToolSpec]:
+    """返回 Billing 专属工具注册表的浅拷贝。
+
+    Returns:
+        以工具名为 key 的 Billing 工具字典。
+    """
+
+    return dict(BILLING_TOOLS)
 

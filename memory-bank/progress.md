@@ -185,3 +185,13 @@
 - 安全边界：两个工具均为内存只读计算，不调用订单、支付、退款、改地址或人工坐席系统；非法入参统一返回结构化错误，不向主链路冒泡异常。
 - 验证：`.venv\Scripts\python.exe -m pytest -q tests/test_agent_tools_general.py` → `5 passed`；全量 pytest → `114 passed`；`compileall agents tests` 与 `git diff --check` 通过。
 - 边界：未实现 Technical/Billing/Escalation 专属工具和四类 Agent profile；Step 5.2 未开始。
+
+## Step 5.2：Technical 与 Billing 专属工具
+
+- 状态：已完成，等待人工确认后再进入 Step 5.3。
+- 修改：扩展 `agents/tools.py`，新增静态错误码查询、低风险诊断计划、账单字段完整度检查和金额比较工具；新增 `tests/test_agent_tools_domain.py`。
+- Technical：`lookup_error_code` 仅读取 400/401/403/404/429/500 静态目录，始终返回 `server_log_checked=False`；`build_diagnostic_plan` 只生成记录错误、检查网络、清缓存和重启应用等 low-risk 步骤。
+- Billing：`check_billing_fields` 仅检查 `order_id`、`amount`、`date`、`payment_channel`，无论字段是否齐全都固定返回 `can_confirm_refund=False`；`compare_amounts` 只计算实际金额减预期金额的差值和大小关系。
+- 安全边界：所有工具均为内存只读计算，不读取后台日志、不调用订单/支付接口、不确认退款，也不推断重复扣款等法律结论；所有工具 schema 均显式 `type=object` 与 `additionalProperties=false`。
+- 验证：Step 5.2 专项 `.venv\Scripts\python.exe -m pytest -q tests/test_agent_tools_domain.py` → `9 passed`；Step 5.1/5.2 回归 → `14 passed`；全量 pytest → `123 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+- 边界：未实现 Escalation 工具、Agent profile 和真实业务写操作；Step 5.3 未开始。
