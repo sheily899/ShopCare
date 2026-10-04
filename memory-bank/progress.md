@@ -135,4 +135,15 @@
 - 验证：知识库专项测试 → `11 passed`；Header-Aware 专项断言六篇文档生成 18 个 chunk、最大 244 字符并聚焦 401 片段；全量 pytest → `88 passed`；脚本 `--help`、compileall 与 `git diff --check` 通过。
 - 回归修复：HTTP Chroma 失败后的 PersistentClient fallback 改为使用独立的 `SegmentAPI` Settings，避免复用被 `HttpClient` 原地改写的 FastAPI 配置；真实 0.5.23 客户端已验证可从 `localhost:8000` 的 404 回退到本地目录。
 - 本地模型复用：从 Lenovo RAG 模块复制可加载的 BGE Small 中文模型到 `models/BAAI/bge-small-zh-v1.5`（约 192 MB）；当前运行时通过 `CUSTOMEROPS_EMBEDDING_MODEL` 指向该目录，CPU 生成 512 维向量，已完成 6 篇文档、18 个 chunk 的实际入库与 `401 认证失败` 检索验证。模型二进制仅作为本机运行时资产，不提交 Git。
-- 边界：未实现 ToolManager、缓存、CircuitBreaker、Query Rewrite、并行召回或 Rerank；下一步等待进入 Step 4.2。
+- 边界：未实现 Query Rewrite、并行召回或 Rerank；Step 4.2 的 ToolManager、缓存与 CircuitBreaker 已完成，下一步等待进入 Step 4.3。
+
+## Step 4.2：Tool、缓存与 Circuit Breaker
+
+- 状态：已完成，等待人工确认后再进入 Step 4.3。
+- 创建：`mcp/tool_manager.py` 与 `tests/test_tool_manager_circuit.py`。
+- 契约：`Tool`、`ToolResult`、`ToolStats` 使用 dataclass；兼容 `name`/`tool_name`、`schema`/`input_schema` 等旧调用别名；默认工具 TTL 为 0、超时为 30 秒，知识工具注册 TTL 固定为 300 秒。
+- 熔断：`CLOSED -> OPEN -> HALF_OPEN -> CLOSED`；连续失败 5 次打开，OPEN 冷却 60 秒后仅放行一次探测，探测失败重置冷却。
+- 缓存：标准库 `OrderedDict` 内存缓存，仅缓存成功结果；TTL 到期删除；容量超过 5000 条时批量淘汰最早 1250 条。
+- 调用顺序：Cache 查询、Breaker 判定、required/type/additionalProperties 校验、`asyncio.wait_for`、统计与熔断更新、fallback 或成功缓存；fallback 成功仍保留主 handler 的 `error`。
+- 验证：`.venv\Scripts\python.exe -m pytest -q tests/test_tool_manager_circuit.py` → `7 passed`；全量 pytest → `95 passed`。
+- 边界：未实现 Query Rewrite、并行召回、去重编排和 LLM Rerank，未接入真实外部业务写操作。

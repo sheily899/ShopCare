@@ -101,7 +101,7 @@ Checkpoint C-1 已完成；Step 3.3 不在 API 路由中提前接入后台任务
 | `tests/test_knowledge_base_embedding.py` | 使用 fake Chroma client 验证 HTTP 失败后的显式日志与 PersistentClient fallback、默认 collection、BGE CPU/normalize 配置、HNSW l2 和旧 collection 迁移。 |
 | `tests/test_knowledge_base_metadata.py` | 验证切片长度上限、七项 metadata 完整性、稳定 `source_chunk_id` 与 `score=round(1-distance,4)` 检索结果；低分结果不因 threshold 被过滤。 |
 
-Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 尚未开始。
+Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 已完成，Step 4.3/4.4 尚未开始。
 
 ### Step 4.1 知识源文本与初始化脚本
 
@@ -127,7 +127,7 @@ Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 尚未开始�
 | `scripts/init_knowledge_base.py` | 复用带标题上下文的切片器，校验七项 metadata、统计最大 chunk 长度，并输出文档数、chunk 数和耗时。 |
 | `tests/test_knowledge_base_chunking.py` | 验证六篇文档生成 16–22 个 chunk、面包屑、500 字符上限、metadata 完整性及 401 专属片段召回。 |
 
-本次升级实测六篇源文档生成 18 个 chunk，最大长度 244 字符；Step 4.2 的 ToolManager/CircuitBreaker 仍未开始。
+本次升级实测六篇源文档生成 18 个 chunk，最大长度 244 字符；Step 4.2 已在后续完成，Step 4.3/4.4 仍未开始。
 
 ### Step 4.1 回归修复：Chroma 本地 fallback 设置隔离
 
@@ -147,3 +147,12 @@ Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 尚未开始�
     $env:CUSTOMEROPS_EMBEDDING_MODEL="D:\\EchoMind\\ShopCare\\models\\BAAI\\bge-small-zh-v1.5"
 
 该模型目录和 Hugging Face 运行缓存已加入 `.gitignore`，不进入版本库；产品 collection 仍固定为 `knowledge_base_zh`，未改变模型职责或 Step 4.2 范围。
+
+## Step 4.2：Tool、缓存与 Circuit Breaker
+
+| 文件 | 职责 |
+| --- | --- |
+| `mcp/tool_manager.py` | 提供 `Tool`/`ToolResult`/`ToolStats` dataclass 契约；按 Cache → Breaker → 参数校验 → `asyncio.wait_for` → 统计/状态更新 → fallback 或成功缓存的顺序执行工具。使用标准库 `OrderedDict` 实现 5000 条容量、1250 条批量淘汰和 TTL；实现 5 次失败、60 秒冷却、半开探测的三态熔断。 |
+| `tests/test_tool_manager_circuit.py` | 覆盖五次失败、60 秒恢复、半开探测失败、超时、参数校验不污染熔断、TTL 命中、5000/1250 淘汰和 fallback 保留原 error。异步测试使用标准库 `asyncio.run`，未新增 pytest 插件依赖。 |
+
+验证：Step 4.2 专项测试 `7 passed`；全量 pytest `95 passed`。Step 4.3 的 Query Rewrite/并行召回和 Step 4.4 的 LLM Rerank 尚未开始。
