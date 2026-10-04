@@ -222,3 +222,13 @@
 - [x] BaseAgent 三轮 Tool Use 上限、异常隔离与统计通过。
 - [x] EscalationAgent 确定性摘要、不调用 LLM、不声明人工已接入通过。
 - [x] `progress.md` 与 `architecture.md` 已同步。
+
+## Step 6.1：路由评分算法、澄清逻辑与执行降级
+
+- 状态：已完成，等待人工确认后再进入 Step 6.2。
+- 修改：扩展 `agents/agent_orchestrator.py`，新增 `_domain_scores`、`_route_decision`、`_execute`、领域关键词/意图矩阵、`AGENT_POOL` 和固定澄清文案；新增 `tests/test_routing_decision.py`。
+- 评分：General 基础 `0.1`；主意图加分 General `0.55`、Technical/Billing `0.75`；Technical/Billing 关键词每个 `0.18`、封顶 `0.45`；General 关键词每个 `0.12`、封顶 `0.35`；实体加分 error_code `0.2`、amount `0.15`、order_id `0.1`。
+- 路由：CRITICAL 以置信度 `1.0` 直接进入 Escalation；HUMAN_HANDOFF 以 `max(intent_confidence, 0.8)` 进入 Escalation；OTHER 且文本长度大于 `2`、置信度低于 `0.5` 时返回固定澄清问题并使用 `primary_agent=None`，不派发 Agent。
+- 辅助与降级：supporting 只从识别器给出的 `secondary_intents` 映射，过滤同域、重复和 Escalation；Technical/Billing 失败自动调用 General，General/Escalation 失败只返回友好失败提示。
+- 验证：Step 6.1 专项 `5 passed`；全量 pytest `137 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+- 边界：尚未实现 Fan-out、ResponseComposer、强制知识检索和 Step 6.2。

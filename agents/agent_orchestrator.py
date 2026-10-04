@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from abc import ABC
@@ -15,7 +16,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-from core.intent_recognizer import IntentCategory, UrgencyLevel
+from core.intent_recognizer import (
+    IntentCategory,
+    IntentResult,
+    UrgencyLevel,
+    _intent_domain,
+)
 from agents.tools import (
     AgentToolSpec,
     CREATE_HANDOFF_SUMMARY_TOOL,
@@ -24,6 +30,9 @@ from agents.tools import (
     make_tool,
     technical_tools,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class AgentType(str, Enum):
@@ -79,7 +88,8 @@ class Request:
 
 @dataclass
 class RoutingDecision:
-    primary_agent: AgentType
+    # 澄清分支没有可执行 Agent，因此允许显式使用 None 表示不派发。
+    primary_agent: Optional[AgentType]
     supporting_agents: List[AgentType] = field(default_factory=list)
     reason: str = ""
     confidence: float = 0.0
@@ -509,6 +519,348 @@ class EscalationAgent(BaseAgent):
                 confidence=0.0,
                 latency_ms=latency_ms,
             )
+
+
+# 初始池每类只放一个 Agent；Step 6.2 再负责并发编排和实例选择。
+AGENT_POOL: Dict[AgentType, BaseAgent] = {
+    AgentType.GENERAL: GeneralAgent(),
+    AgentType.TECHNICAL: TechnicalAgent(),
+    AgentType.BILLING: BillingAgent(),
+    AgentType.ESCALATION: EscalationAgent(),
+}
+
+
+_GENERAL_INTENTS = frozenset(
+    {
+        IntentCategory.QUERY,
+        IntentCategory.ORDER_STATUS,
+        IntentCategory.LOGISTICS,
+        IntentCategory.REQUEST,
+        IntentCategory.COMPLAINT,
+        IntentCategory.GREETING,
+        IntentCategory.FEEDBACK,
+        IntentCategory.OTHER,
+    }
+)
+_TECHNICAL_INTENTS = frozenset(
+    {
+        IntentCategory.TECHNICAL,
+        IntentCategory.TECHNICAL_LOGIN,
+        IntentCategory.TECHNICAL_CRASH,
+    }
+)
+_BILLING_INTENTS = frozenset(
+    {
+        IntentCategory.BILLING,
+        IntentCategory.ACCOUNT,
+        IntentCategory.ACCOUNT_SECURITY,
+        IntentCategory.REFUND,
+        IntentCategory.INVOICE,
+        IntentCategory.PAYMENT_ISSUE,
+    }
+)
+_TECHNICAL_KEYWORDS = (
+    "崩溃",
+    "报错",
+    "error",
+    "crash",
+    "无法登录",
+    "登录失败",
+    "500",
+    "401",
+    "403",
+    "404",
+    "验证码",
+    "网络",
+)
+_BILLING_KEYWORDS = (
+    "退款",
+    "退货",
+    "扣款",
+    "发票",
+    "账单",
+    "支付",
+    "订阅",
+    "refund",
+    "invoice",
+    "多扣",
+)
+_GENERAL_KEYWORDS = ("订单", "物流", "快递", "配送", "会员", "积分", "咨询", "帮助")
+CLARIFICATION_PROMPT = "我还不能确定您要处理的是哪类问题。请补充一下是订单物流、退款账单、账户资料，还是技术故障？"
+
+
+class _DomainScores(dict):
+    """保存三域分数，并兼容 `AgentType` 与字符串两种读取方式。
+
+    旧版编排器使用 `AgentType` 作为字典键，而当前模块的测试和诊断输出
+    更适合使用稳定的字符串域名；统一内部键为枚举并兼容两种读取方式，
+    可以避免迁移期间出现隐蔽的键类型不一致。
+    """
+
+    @staticmethod
+    def _normalize_key(key: Any) -> Any:
+        if isinstance(key, AgentType):
+            return key
+        try:
+            return AgentType(str(key))
+        except (TypeError, ValueError):
+            return key
+
+    def __getitem__(self, key: Any) -> float:
+        return super().__getitem__(self._normalize_key(key))
+
+    def get(self, key: Any, default: Any = None) -> Any:
+        return super().get(self._normalize_key(key), default)
+
+    def __contains__(self, key: object) -> bool:
+        return super().__contains__(self._normalize_key(key))
+
+
+def _coerce_intent(value: Any) -> IntentCategory:
+    """将识别结果中的字符串或枚举安全归一为 IntentCategory。"""
+
+    if isinstance(value, IntentCategory):
+        return value
+    try:
+        return IntentCategory(str(value))
+    except (TypeError, ValueError):
+        return IntentCategory.OTHER
+
+
+def _intent_result_value(result: Any, key: str, default: Any = None) -> Any:
+    """兼容 IntentResult dataclass 与测试字典。"""
+
+    if result is None:
+        return default
+    if isinstance(result, Mapping):
+        return result.get(key, default)
+    return getattr(result, key, default)
+
+
+def _domain_scores(
+    request: Request,
+    intent_result: Optional[IntentResult] = None,
+) -> Dict[AgentType, float]:
+    """按主意图、关键词和实体为 General/Technical/Billing 计算领域分数。
+
+    Args:
+        request: 当前内部请求，提供原始文本、意图和实体。
+        intent_result: 可选的识别结果；存在时优先使用其意图与实体。
+
+    Returns:
+        以 `AgentType.GENERAL`、`AgentType.TECHNICAL`、`AgentType.BILLING` 为
+        key 的三域分数；也兼容用对应字符串读取。
+        分数仅用于相对路由排序，不代表概率。
+    """
+
+    message = (request.message or "").lower()
+    intent = _coerce_intent(
+        _intent_result_value(intent_result, "intent", request.intent)
+    )
+    result_entities = _intent_result_value(intent_result, "entities", None)
+    # 请求上的实体是识别器外部补充信息，不能因 IntentResult 使用默认空字典而丢失。
+    entities: Dict[str, Any] = dict(request.entities or {})
+    if isinstance(result_entities, Mapping):
+        entities.update(result_entities)
+    scores = _DomainScores(
+        {
+            AgentType.GENERAL: 0.1,
+            AgentType.TECHNICAL: 0.0,
+            AgentType.BILLING: 0.0,
+        }
+    )
+
+    if intent in _GENERAL_INTENTS:
+        scores[AgentType.GENERAL] += 0.55
+    if intent in _TECHNICAL_INTENTS:
+        scores[AgentType.TECHNICAL] += 0.75
+    if intent in _BILLING_INTENTS:
+        scores[AgentType.BILLING] += 0.75
+
+    # Why：关键词加分上限防止单条长消息重复命中后压过明确的主意图分流。
+    technical_hits = sum(1 for keyword in _TECHNICAL_KEYWORDS if keyword in message)
+    billing_hits = sum(1 for keyword in _BILLING_KEYWORDS if keyword in message)
+    general_hits = sum(1 for keyword in _GENERAL_KEYWORDS if keyword in message)
+    scores[AgentType.TECHNICAL] += min(0.45, technical_hits * 0.18)
+    scores[AgentType.BILLING] += min(0.45, billing_hits * 0.18)
+    scores[AgentType.GENERAL] += min(0.35, general_hits * 0.12)
+
+    if entities.get("error_code"):
+        scores[AgentType.TECHNICAL] += 0.2
+    if entities.get("amount"):
+        scores[AgentType.BILLING] += 0.15
+    if entities.get("order_id"):
+        scores[AgentType.GENERAL] += 0.1
+    return _DomainScores({domain: round(score, 3) for domain, score in scores.items()})
+
+
+def _agent_for_intent(intent: IntentCategory) -> AgentType:
+    """将已确认意图映射到其领域 Agent。"""
+
+    domain = _intent_domain(intent)
+    return {
+        "general": AgentType.GENERAL,
+        "technical": AgentType.TECHNICAL,
+        "billing": AgentType.BILLING,
+        "escalation": AgentType.ESCALATION,
+    }[domain]
+
+
+def _route_decision(
+    request: Request,
+    intent_result: Optional[IntentResult] = None,
+) -> RoutingDecision:
+    """执行安全优先的主 Agent 选择、澄清和显式辅助 Agent 映射。
+
+    Args:
+        request: 当前内部请求。
+        intent_result: 可选的识别结果；用于置信度、紧急度和 secondary intents。
+
+    Returns:
+        `RoutingDecision`。低置信度 OTHER 返回 ``primary_agent=None``，表示只能
+        输出澄清问题，绝不应进入任何 Agent 执行任务。
+    """
+
+    request_intent = _coerce_intent(request.intent)
+    result_intent = _coerce_intent(
+        _intent_result_value(intent_result, "intent", request_intent)
+    )
+    intent = result_intent
+    confidence_value = _intent_result_value(
+        intent_result, "confidence", request.intent_confidence
+    )
+    try:
+        confidence = float(confidence_value)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    request_urgency = request.urgency
+    urgency = _intent_result_value(intent_result, "urgency", request_urgency)
+    if not isinstance(urgency, UrgencyLevel):
+        try:
+            urgency = UrgencyLevel(int(urgency)) if urgency is not None else None
+        except (TypeError, ValueError):
+            urgency = None
+
+    # Why：CRITICAL 需要先进入升级建议路径，避免领域 Agent 继续执行普通问答。
+    # Why：任一层标记为 CRITICAL 都必须升级，防止识别结果覆盖请求侧的安全信号。
+    if urgency == UrgencyLevel.CRITICAL or request_urgency == UrgencyLevel.CRITICAL:
+        return RoutingDecision(
+            primary_agent=AgentType.ESCALATION,
+            reason="紧急度为 CRITICAL，触发升级路由",
+            confidence=1.0,
+        )
+    # Why：HUMAN_HANDOFF 是终止型意图，最低 0.8 才能稳定表达升级决策。
+    # Why：任一层确认人工意图都不能被普通域路由覆盖，避免越过人机协同边界。
+    if intent is IntentCategory.HUMAN_HANDOFF or request_intent is IntentCategory.HUMAN_HANDOFF:
+        return RoutingDecision(
+            primary_agent=AgentType.ESCALATION,
+            reason="意图为 human_handoff，触发升级路由",
+            confidence=max(confidence, 0.8),
+        )
+    # Why：低置信度 OTHER 不应误派发，先澄清可避免错误的业务域执行。
+    if intent is IntentCategory.OTHER and len((request.message or "").strip()) > 2 and confidence < 0.5:
+        return RoutingDecision(
+            primary_agent=None,
+            reason=CLARIFICATION_PROMPT,
+            confidence=confidence,
+        )
+
+    scores = _domain_scores(request, intent_result)
+    available = {
+        agent_type: score
+        for agent_type, score in scores.items()
+        if AGENT_POOL.get(agent_type)
+    }
+    if not available:
+        return RoutingDecision(
+            primary_agent=AgentType.GENERAL,
+            reason="无可用领域 Agent，降级到 GeneralAgent",
+            confidence=0.1,
+        )
+    primary_agent, primary_score = max(available.items(), key=lambda item: item[1])
+
+    if intent_result is not None:
+        # 识别器明确返回空列表时也必须尊重它，不能从请求文本再次猜测辅助域。
+        secondary_values = _intent_result_value(intent_result, "secondary_intents", [])
+        secondary_intents = list(secondary_values or [])
+    else:
+        secondary_intents = list(request.secondary_intents or [])
+    supporting: List[AgentType] = []
+    for secondary in secondary_intents:
+        target = _agent_for_intent(_coerce_intent(secondary))
+        if target in (primary_agent, AgentType.ESCALATION) or target in supporting:
+            continue
+        if AGENT_POOL.get(target):
+            supporting.append(target)
+    score_text = ", ".join(
+        f"{agent_type.value}={score:.2f}"
+        for agent_type, score in sorted(
+            available.items(), key=lambda item: item[1], reverse=True
+        )
+    )
+    return RoutingDecision(
+        primary_agent=primary_agent,
+        supporting_agents=supporting,
+        reason=f"intent={intent.value}, primary={primary_agent.value}, scores=[{score_text}]",
+        confidence=round(min(primary_score, 1.0), 3),
+    )
+
+
+def _friendly_failure(agent_type: AgentType, latency_ms: float = 0.0) -> AgentResponse:
+    """构造不暴露内部异常细节的友好失败响应。"""
+
+    return AgentResponse(
+        agent_type=agent_type,
+        content="当前暂时无法完成该请求，请稍后重试。",
+        success=False,
+        confidence=0.0,
+        latency_ms=max(0.0, latency_ms),
+    )
+
+
+async def _execute(request: Request, agent_type: AgentType) -> AgentResponse:
+    """执行指定 Agent，并对技术/账单失败自动降级到 General。
+
+    Args:
+        request: 当前内部请求。
+        agent_type: 路由选定的 Agent 类型。
+
+    Returns:
+        目标 Agent 或 General fallback 的响应；异常被转换为友好失败结果。
+    """
+
+    agent = AGENT_POOL.get(agent_type)
+    if agent is None and agent_type in (AgentType.TECHNICAL, AgentType.BILLING):
+        logger.warning("%s Agent 不可用，直接尝试 General fallback", agent_type.value)
+        agent = AGENT_POOL.get(AgentType.GENERAL)
+        agent_type = AgentType.GENERAL
+    if agent is None:
+        return _friendly_failure(agent_type)
+
+    started = time.perf_counter()
+    try:
+        response = await agent.handle(request)
+    except Exception as exc:
+        logger.warning("%s Agent 执行异常：%s", agent_type.value, exc)
+        response = _friendly_failure(
+            agent_type, (time.perf_counter() - started) * 1000
+        )
+
+    if response.success or agent_type in (AgentType.GENERAL, AgentType.ESCALATION):
+        return response if response.success else _friendly_failure(agent_type, response.latency_ms)
+
+    # Why：Technical/Billing 的局部失败必须给用户一个通用兜底，避免专属 Agent 故障扩大为全局失败。
+    fallback = AGENT_POOL.get(AgentType.GENERAL)
+    if fallback is None or fallback is agent:
+        return _friendly_failure(agent_type, response.latency_ms)
+    try:
+        fallback_response = await fallback.handle(request)
+        if fallback_response.success:
+            return fallback_response
+        return _friendly_failure(AgentType.GENERAL, fallback_response.latency_ms)
+    except Exception as exc:
+        logger.warning("General fallback 执行异常：%s", exc)
+        return _friendly_failure(AgentType.GENERAL, response.latency_ms)
 
 
 @dataclass

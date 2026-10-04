@@ -222,3 +222,14 @@ Step 5.3 只提供结构化上下文快照，不执行任何真实工单、订�
 共享 `search_knowledge_base` 当前仅是只读注入占位，返回不可用提示，不连接外部系统；真正的 KnowledgeBase handler、路由、Fan-out 和 ResponseComposer 留给 Step 6。Escalation 的 `escalate=True` 只表示升级建议，不等价于 API 的 `escalated=True`。
 
 验证：Step 5.4 专项 `5 passed`；Step 5 契约与工具回归 `30 passed`；全量 pytest `132 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+
+## Step 6.1：路由评分、澄清与执行降级
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `agents/agent_orchestrator.py` | 新增 `_domain_scores(request, intent_result)`，按基础分、主意图、关键词封顶和实体权重计算三域相对分；新增 `_route_decision` 的 CRITICAL/HUMAN_HANDOFF 安全优先路由、低置信度 OTHER 澄清、主 Agent 选择和显式 secondary 映射；新增 `_execute` 的 Technical/Billing → General fallback 与 General/Escalation 友好失败隔离。 |
+| `tests/test_routing_decision.py` | 验证 CRITICAL/HUMAN_HANDOFF 终止路由、OTHER 低置信度澄清不派发、Technical 领域加分、secondary 仅显式跨域映射和 Technical 异常降级 General。 |
+
+评分值只用于相对路由，不代表概率；澄清分支用 `primary_agent=None` 表示无执行目标。Step 6.1 不创建并发任务，不实现 Fan-out、ResponseComposer 或真实业务接口。
+
+验证：专项 `5 passed`；全量 pytest `137 passed`；`compileall agents tests` 与 `git diff --check` 通过。
