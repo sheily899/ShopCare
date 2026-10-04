@@ -281,3 +281,19 @@
 - 异常边界：记忆读写失败只记录 warning 并保留响应链路；画像任务通过 done callback 消费异常，禁止后台异常冒泡改变 HTTP 响应。
 - 验证：`.venv\Scripts\python.exe -m pytest tests/test_chat_integration.py -q` → `4 passed`；记忆与集成回归 → `19 passed`；全量 pytest → `153 passed`；compileall 与 `git diff --check` 通过。
 - 边界：未实现 `/search`、知识上传、trace/supporting routes、监控路由和评测路由；Step 7.3 未开始。
+
+## Step 7.3：知识检索、文档上传、Trace 追溯与技能重载路由
+
+- 状态：已完成，Step 7 主链路支持性 API 已闭环；等待人工确认后再进入 Step 8。
+- 修改：扩展 `api/main.py`，新增 `/search`、`/knowledge/add`、`/knowledge/upload`、`/knowledge/stats`、`/trace/tool/{request_id}`、`/trace/tools`、`/skills` 与 `/skills/reload`；新增 `tests/test_api_supporting_routes.py`。
+- 知识管理：`/search` 复用 `KnowledgeBase.search`；文本和上传文件复用 `add_documents` 切片入库；上传仅允许 `.txt`、`.md`、`.json`，单文件上限 10MB，非 JSON 使用 UTF-8 `errors="ignore"` 解码；同步知识库操作经 `asyncio.to_thread` 隔离。
+- Trace 与技能：Trace 查询最多读取编排器内存 deque 的 200 条记录，按 request_id 返回单条详情；响应明确标注 `storage=memory`、`restart_loses_data=true`。SkillManager 增加本地 Markdown 技能目录 `reload_skills()` 热扫描。
+- 安全边界：保留开发期开放 CORS；管理与上传路由当前无鉴权，已在 API 文档中声明生产前需接入鉴权网关；不调用订单、支付、退款、工单或人工坐席系统。
+- 验证：支持性路由专项 `4 passed`；指定 API 回归 `20 passed`；全量 pytest `157 passed`；`compileall api tests` 与 `git diff --check` 通过。
+
+## Checkpoint 主链路
+
+- [x] `/health` 在 fake 依赖下通过并返回产品知识库配置与 Agent 统计。
+- [x] `/chat` 完成上下文读取、意图识别、编排、记忆回写和画像后台任务隔离。
+- [x] `/search`、知识入库/上传、知识库统计、Trace 查询、Skill 列表/热加载路由通过离线测试。
+- [x] Trace 明确为最多 200 条内存运行期数据，服务重启后丢失；更新 `progress.md` 与 `architecture.md`。

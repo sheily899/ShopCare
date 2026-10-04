@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import json
 import logging
 import os
 from pathlib import Path
@@ -15,7 +16,8 @@ import time
 from typing import Any, Dict, List, Mapping, Optional
 import uuid
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, field_validator
 
 from agents.agent_orchestrator import (
@@ -34,6 +36,12 @@ from memory.conversation_memory import MemoryContext, MemoryManager, MsgRole
 
 
 logger = logging.getLogger(__name__)
+
+# Why：10MiB 是 Step7.3 的单文件安全上限，先读上限+1 字节即可拒绝超大上传，
+# 避免管理接口把任意大文件完整载入内存。
+MAX_KNOWLEDGE_UPLOAD_BYTES = 10 * 1024 * 1024
+ALLOWED_KNOWLEDGE_SUFFIXES = {".txt", ".md", ".json"}
+TRACE_MEMORY_LIMIT = 200
 
 
 class IntentRecognizer:
@@ -88,11 +96,23 @@ class SkillManager:
 
     def __init__(self, skills_dir: str = "skills") -> None:
         self.skills_dir = Path(skills_dir)
-        self.skills: List[str] = (
+        self.skills: List[str] = []
+        self.reload_skills()
+
+    def reload_skills(self) -> Dict[str, Any]:
+        """重新扫描本地 Markdown 技能目录并返回当前技能快照。
+
+        Returns:
+            包含 ``success``、``skills`` 与 ``count`` 的本地扫描结果；目录不存在
+            时返回空列表，不访问任何外部服务。
+        """
+
+        self.skills = (
             sorted(path.stem for path in self.skills_dir.glob("*.md"))
             if self.skills_dir.is_dir()
             else []
         )
+        return {"success": True, "skills": list(self.skills), "count": len(self.skills)}
 
     async def close(self) -> None:
         """释放技能扫描器资源；当前扫描为本地只读操作，无需额外动作。"""
@@ -364,6 +384,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="ShopCare", version="0.1.0", lifespan=lifespan)
+# Why：保留开发期前端联调基线；管理路由当前无鉴权，生产前必须补齐鉴权网关。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class ChatRequest(BaseModel):
@@ -450,6 +478,43 @@ class ChatResponse(BaseModel):
     intent_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     intent_source_scores: Dict[str, float] = Field(default_factory=dict)
     intent_diagnostics: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SearchRequest(BaseModel):
+    """知识库只读检索的 API 输入契约。
+
+    Attributes:
+        query: 待检索的自然语言问题。
+        top_k: 请求的最大召回条数，必须为正整数。
+    """
+
+    query: str
+    top_k: int = Field(default=5, ge=1)
+
+    @field_validator("query")
+    @classmethod
+    def query_must_not_be_blank(cls, value: str) -> str:
+        """拒绝空白检索词，避免把无意义请求传给向量库。"""
+
+        if not value.strip():
+            raise ValueError("query must not be blank")
+        return value
+
+
+class KnowledgeAddRequest(BaseModel):
+    """知识库文本入库的 API 输入契约。"""
+
+    title: str
+    content: str
+
+    @field_validator("title", "content")
+    @classmethod
+    def text_must_not_be_blank(cls, value: str) -> str:
+        """拒绝没有标题或正文的入库请求。"""
+
+        if not value.strip():
+            raise ValueError("title/content must not be blank")
+        return value
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -634,6 +699,255 @@ async def health() -> Dict[str, Any]:
         "agent_stats": _agent_stats(orchestrator),
         "knowledge_base": await _knowledge_metadata(knowledge_base),
     }
+
+
+def _require_ready() -> None:
+    """校验生命周期是否完成装配，避免支持性路由伪造可用状态。
+
+    Raises:
+        HTTPException: 应用未进入 ready 状态时返回 503。
+    """
+
+    if not getattr(app.state, "ready", False):
+        raise HTTPException(status_code=503, detail="ShopCare 尚未就绪")
+
+
+def _require_knowledge_base() -> Any:
+    """取得已装配的知识库组件，否则返回明确的 503。"""
+
+    _require_ready()
+    knowledge_base = getattr(app.state, "knowledge_base", None)
+    if knowledge_base is None:
+        raise HTTPException(status_code=503, detail="知识库尚未装配")
+    return knowledge_base
+
+
+def _normalize_search_result(item: Any) -> Dict[str, Any]:
+    """将 KnowledgeBase 检索结果收敛为前端稳定字段。"""
+
+    row = item if isinstance(item, Mapping) else {}
+    chunk_id = row.get("source_chunk_id") or row.get("chunk_id") or row.get("id") or ""
+    return {
+        "title": str(row.get("title", "")),
+        "chunk_id": str(chunk_id),
+        "content": str(row.get("content", row.get("document", ""))),
+        "score": float(row.get("score", 0.0)),
+    }
+
+
+@app.post("/search")
+async def search_knowledge(request: SearchRequest) -> Dict[str, Any]:
+    """执行产品知识库只读检索。
+
+    Args:
+        request: 包含自然语言 query 与 top_k 的检索请求。
+
+    Returns:
+        ``results`` 列表，每项包含 title、chunk_id、content 与 score。
+
+    Raises:
+        HTTPException: 服务未就绪或知识库检索异常时返回 503。
+
+    说明：当前管理/检索路由开放且没有鉴权，生产前必须接入鉴权网关。
+    """
+
+    knowledge_base = _require_knowledge_base()
+    try:
+        raw = await asyncio.to_thread(knowledge_base.search, request.query, request.top_k)
+        raw = await _maybe_await(raw)
+    except Exception as exc:
+        logger.warning("知识库检索路由失败：%s", exc)
+        raise HTTPException(status_code=503, detail="知识库检索暂不可用") from exc
+    return {
+        "query": request.query,
+        "top_k": request.top_k,
+        "results": [_normalize_search_result(item) for item in (raw or [])],
+    }
+
+
+@app.post("/knowledge/add")
+async def add_knowledge(request: KnowledgeAddRequest) -> Dict[str, Any]:
+    """接收纯文本并调用 KnowledgeBase 切片入库。
+
+    Args:
+        request: 文档标题与正文。
+
+    Returns:
+        ``success`` 与实际新增 chunk 数量；不执行外部订单或支付写操作。
+
+    Raises:
+        HTTPException: 服务未就绪或知识库写入失败时返回 503。
+
+    说明：这是开发期开放管理接口，正式环境必须由鉴权网关保护。
+    """
+
+    knowledge_base = _require_knowledge_base()
+    try:
+        added = await asyncio.to_thread(
+            knowledge_base.add_documents,
+            [{"title": request.title, "content": request.content}],
+        )
+        added = await _maybe_await(added)
+    except Exception as exc:
+        logger.warning("知识库文本入库失败：%s", exc)
+        raise HTTPException(status_code=503, detail="知识库写入暂不可用") from exc
+    return {"success": True, "title": request.title, "added": int(added or 0)}
+
+
+@app.post("/knowledge/upload")
+async def upload_knowledge(file: UploadFile = File(...)) -> Dict[str, Any]:
+    """上传 txt/md/json 文档并交由 KnowledgeBase 切片入库。
+
+    Args:
+        file: multipart 上传文件；扩展名和大小均在 API 边界校验。
+
+    Returns:
+        文件名、入库 chunk 数和成功标志。
+
+    Raises:
+        HTTPException: 扩展名不允许、超过 10MB、JSON 无法解析或知识库不可用。
+
+    说明：当前管理路由无鉴权，生产前需补齐鉴权网关；本接口不连接外部业务系统。
+    """
+
+    knowledge_base = _require_knowledge_base()
+    filename = str(file.filename or "")
+    suffix = Path(filename).suffix.lower()
+    if not filename or suffix not in ALLOWED_KNOWLEDGE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="仅支持 .txt、.md、.json 文件")
+    try:
+        # Why：读取上限+1 字节即可判断 10MB 越界，避免无界内存占用。
+        payload = await file.read(MAX_KNOWLEDGE_UPLOAD_BYTES + 1)
+    except Exception as exc:
+        logger.warning("知识文件读取失败：%s", exc)
+        raise HTTPException(status_code=400, detail="上传文件读取失败") from exc
+    if len(payload) > MAX_KNOWLEDGE_UPLOAD_BYTES:
+        raise HTTPException(status_code=400, detail="单文件大小不能超过 10MB")
+    try:
+        # Why：非 JSON 文档按约定忽略非法 UTF-8 字节，保证客服文本导入不中断。
+        content = payload.decode("utf-8", errors="ignore")
+        if suffix == ".json":
+            json.loads(content)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail="JSON 文件内容无效") from exc
+    try:
+        added = await asyncio.to_thread(
+            knowledge_base.add_documents,
+            [{"title": Path(filename).stem, "content": content}],
+        )
+        added = await _maybe_await(added)
+    except Exception as exc:
+        logger.warning("知识文件入库失败：%s", exc)
+        raise HTTPException(status_code=503, detail="知识库写入暂不可用") from exc
+    return {"success": True, "filename": filename, "added": int(added or 0)}
+
+
+@app.get("/knowledge/stats")
+async def knowledge_stats() -> Dict[str, Any]:
+    """返回产品知识库当前片段数量与模型配置。"""
+
+    knowledge_base = _require_knowledge_base()
+    try:
+        count_value = getattr(knowledge_base, "doc_count", 0)
+        if callable(count_value):
+            count_value = await asyncio.to_thread(count_value)
+            count_value = await _maybe_await(count_value)
+        elif count_value == 0:
+            collection = getattr(knowledge_base, "_collection", None)
+            count_method = getattr(collection, "count", None)
+            if callable(count_method):
+                count_value = await asyncio.to_thread(count_method)
+                count_value = await _maybe_await(count_value)
+        return {
+            "collection_name": str(getattr(knowledge_base, "collection_name", "")),
+            "embedding_model": str(getattr(knowledge_base, "embedding_model", "")),
+            "doc_count": int(count_value or 0),
+        }
+    except Exception as exc:
+        logger.warning("读取知识库统计失败：%s", exc)
+        raise HTTPException(status_code=503, detail="知识库统计暂不可用") from exc
+
+
+def _get_trace_snapshot() -> List[Dict[str, Any]]:
+    """读取编排器公开的内存 Trace 快照，最多保留 200 条。"""
+
+    _require_ready()
+    orchestrator = getattr(app.state, "agent_orchestrator", None)
+    getter = getattr(orchestrator, "get_recent_traces", None)
+    if not callable(getter):
+        raise HTTPException(status_code=503, detail="Trace 组件尚未装配")
+    try:
+        traces = getter(limit=TRACE_MEMORY_LIMIT)
+        return [dict(item) for item in (traces or []) if isinstance(item, Mapping)]
+    except Exception as exc:
+        logger.warning("读取内存 Trace 失败：%s", exc)
+        raise HTTPException(status_code=503, detail="Trace 暂不可用") from exc
+
+
+@app.get("/trace/tool/{request_id}")
+async def get_tool_trace(request_id: str) -> Dict[str, Any]:
+    """按 request_id 返回工具调用 Trace。
+
+    Trace 当前只驻留进程内存，服务重启后会丢失；该接口不提供审计级持久化。
+    """
+
+    traces = _get_trace_snapshot()
+    for trace in traces:
+        if str(trace.get("request_id", "")) == request_id:
+            return {
+                "request_id": request_id,
+                "trace": trace,
+                "storage": "memory",
+                "restart_loses_data": True,
+            }
+    raise HTTPException(status_code=404, detail="未找到对应 request_id 的 Trace")
+
+
+@app.get("/trace/tools")
+async def get_tool_traces() -> Dict[str, Any]:
+    """返回最近的内存工具 Trace，并标记服务重启丢失边界。"""
+
+    return {
+        "traces": _get_trace_snapshot(),
+        "storage": "memory",
+        "max_items": TRACE_MEMORY_LIMIT,
+        "restart_loses_data": True,
+    }
+
+
+@app.get("/skills")
+async def list_skills() -> Dict[str, Any]:
+    """返回本地 SkillManager 当前已加载的技能列表。"""
+
+    _require_ready()
+    manager = getattr(app.state, "skill_manager", None)
+    if manager is None:
+        raise HTTPException(status_code=503, detail="SkillManager 尚未装配")
+    skills = list(getattr(manager, "skills", []) or [])
+    return {"skills": skills, "count": len(skills)}
+
+
+@app.post("/skills/reload")
+async def reload_skills() -> Dict[str, Any]:
+    """重新扫描本地技能目录并返回热加载结果。
+
+    说明：该开放管理接口当前无鉴权，正式生产前必须接入鉴权网关。
+    """
+
+    _require_ready()
+    manager = getattr(app.state, "skill_manager", None)
+    reload_method = getattr(manager, "reload_skills", None)
+    if not callable(reload_method):
+        raise HTTPException(status_code=503, detail="SkillManager 不支持热加载")
+    try:
+        result = await _maybe_await(reload_method())
+    except Exception as exc:
+        logger.warning("技能热加载失败：%s", exc)
+        raise HTTPException(status_code=503, detail="技能热加载失败") from exc
+    if isinstance(result, Mapping):
+        return dict(result)
+    skills = list(getattr(manager, "skills", []) or [])
+    return {"success": True, "skills": skills, "count": len(skills)}
 
 
 @app.post("/chat", response_model=ChatResponse)

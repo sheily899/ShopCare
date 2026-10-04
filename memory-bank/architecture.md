@@ -302,3 +302,33 @@ ChatRequest
 - 画像更新是非阻塞增强任务；任务失败只写日志，不影响已完成的 HTTP 响应。
 
 验证：Step 7.2 专项 `4 passed`；记忆与集成回归 `19 passed`；全量 pytest `153 passed`；`compileall api tests` 与 `git diff --check` 通过。
+
+## Step 7.3：支持性 API 与运行期运维边界
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `api/main.py` | 新增知识库 `/search`、`/knowledge/add`、`/knowledge/upload`、`/knowledge/stats` 路由；新增内存 Trace `/trace/tool/{request_id}`、`/trace/tools` 查询；新增 `/skills` 与 `/skills/reload` 本地技能目录接口；`SkillManager` 增加 `reload_skills()`；保留开发期 CORS 开放基线。 |
+| `tests/test_api_supporting_routes.py` | 使用离线 KnowledgeBase、Redis、SkillManager 和编排器替身，覆盖检索/入库、10MB 与扩展名校验、统计、Trace 内存边界和技能热加载。 |
+
+### 支持性路由数据流与安全边界
+
+```text
+SearchRequest / UploadFile / KnowledgeAddRequest
+        -> API 校验（扩展名、10MB、JSON 格式）
+        -> asyncio.to_thread(KnowledgeBase.search/add_documents)
+        -> 结构化检索或入库结果
+
+AgentOrchestrator._recent_traces (deque maxlen=200)
+        -> /trace/tools 或 /trace/tool/{request_id}
+        -> storage=memory, restart_loses_data=true
+
+SkillManager.skills_dir/*.md
+        -> /skills/reload -> 本地重新扫描 -> /skills 返回新快照
+```
+
+- `/knowledge/upload` 只处理产品知识源文本，不导入评测库；非 JSON 文件使用 UTF-8 `errors="ignore"`，JSON 先做解析校验。
+- `/search` 输出 `title`、`chunk_id`、`content`、`score`，不增加 score threshold，也不伪造检索概率含义。
+- `/trace/*` 读取运行期内存数据，不是审计级持久化日志；应用重启后历史 Trace 丢失。
+- 管理类 API 与 CORS 当前为开发期开放状态，代码文档已明确生产前需要鉴权网关；所有路由都不连接外部订单、支付、退款、工单或人工系统。
+
+验证：支持性路由专项 `4 passed`；指定 API 回归 `20 passed`；全量 pytest `157 passed`；`compileall api tests` 与 `git diff --check` 通过。
