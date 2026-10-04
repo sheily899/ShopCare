@@ -135,25 +135,43 @@
 - 验证：知识库专项测试 → `11 passed`；Header-Aware 专项断言六篇文档生成 18 个 chunk、最大 244 字符并聚焦 401 片段；全量 pytest → `88 passed`；脚本 `--help`、compileall 与 `git diff --check` 通过。
 - 回归修复：HTTP Chroma 失败后的 PersistentClient fallback 改为使用独立的 `SegmentAPI` Settings，避免复用被 `HttpClient` 原地改写的 FastAPI 配置；真实 0.5.23 客户端已验证可从 `localhost:8000` 的 404 回退到本地目录。
 - 本地模型复用：从 Lenovo RAG 模块复制可加载的 BGE Small 中文模型到 `models/BAAI/bge-small-zh-v1.5`（约 192 MB）；当前运行时通过 `CUSTOMEROPS_EMBEDDING_MODEL` 指向该目录，CPU 生成 512 维向量，已完成 6 篇文档、18 个 chunk 的实际入库与 `401 认证失败` 检索验证。模型二进制仅作为本机运行时资产，不提交 Git。
-- 边界：Step 4.3 的 Query Rewrite、并行召回与去重已完成；LLM Rerank 仍留待 Step 4.4。
+- 边界：Step 4.3 的 Query Rewrite、并行召回与去重已完成；LLM Rerank 在 Step 4.4 独立实现。
 
 ## Step 4.2：Tool、缓存与 Circuit Breaker
 
-- 状态：已完成，等待人工确认后再进入 Step 4.3。
+- 状态：已完成；Step 4.3 与 Step 4.4 已在后续完成。
 - 创建：`mcp/tool_manager.py` 与 `tests/test_tool_manager_circuit.py`。
 - 契约：`Tool`、`ToolResult`、`ToolStats` 使用 dataclass；兼容 `name`/`tool_name`、`schema`/`input_schema` 等旧调用别名；默认工具 TTL 为 0、超时为 30 秒，知识工具注册 TTL 固定为 300 秒。
 - 熔断：`CLOSED -> OPEN -> HALF_OPEN -> CLOSED`；连续失败 5 次打开，OPEN 冷却 60 秒后仅放行一次探测，探测失败重置冷却。
 - 缓存：标准库 `OrderedDict` 内存缓存，仅缓存成功结果；TTL 到期删除；容量超过 5000 条时批量淘汰最早 1250 条。
 - 调用顺序：Cache 查询、Breaker 判定、required/type/additionalProperties 校验、`asyncio.wait_for`、统计与熔断更新、fallback 或成功缓存；fallback 成功仍保留主 handler 的 `error`。
 - 验证：`.venv\Scripts\python.exe -m pytest -q tests/test_tool_manager_circuit.py` → `7 passed`；全量 pytest → `95 passed`。
-- 边界：未实现 Query Rewrite、并行召回、去重编排和 LLM Rerank，未接入真实外部业务写操作。
+- 边界：Query Rewrite、并行召回、去重编排和 LLM Rerank 已完成；未接入真实外部业务写操作。
 
 ## Step 4.3：Query Rewrite、并行召回与稳定去重
 
-- 状态：已完成，等待人工确认后再进入 Step 4.4。
+- 状态：已完成；Checkpoint C/D 的 RAG 与工具韧性能力已闭环。
 - 修改：扩展 `mcp/tool_manager.py`，增加可注入 Anthropic client、Query Rewrite、并行召回和多级稳定 identity 去重；新增 `tests/test_tool_manager_reasoning.py`。
 - Query Rewrite：保留原始 query；LLM 最多生成 3 条改写；固定 `temperature=0.3`、`max_tokens=256`，不传 history、MemoryContext 或用户画像；返回非法或异常时回退为原始 query。
 - 并行召回：按 `recall_k=max(top_k,5)` 为每个 query 调用现有 Tool，使用 `asyncio.gather(..., return_exceptions=True)`，单路异常不阻断其他成功召回。
 - 去重：按 `source_chunk_id -> content_hash -> runtime_id -> content SHA256` 生成稳定 identity；同一 identity 保留较高 score，缺失 identity 的候选独立保留；不添加 score threshold，不进行最终排序或 Top-K 截断。
-- 边界：`ToolResult.reranked=False`、`rerank_degraded=False`；未实现 Step 4.4 LLM Rerank、Cross-Encoder 或真实外部业务写操作。
+- 边界：Step 4.3 本身保持 `ToolResult.reranked=False`、`rerank_degraded=False`；Rerank 由 Step 4.4 独立处理，不引入 Cross-Encoder 或真实外部业务写操作。
 - 验证：Step 4.3 专项 `.venv\Scripts\python.exe -m pytest -q tests/test_tool_manager_reasoning.py` → `9 passed`；Step 4.2 回归 → `7 passed`；全量 pytest → `104 passed`；compileall 与 `git diff --check` 通过。
+
+## Step 4.4：LLM Rerank 重排序与降级状态机
+
+- 状态：已完成，Checkpoint C/D 的 RAG 与工具治理验收通过；等待人工确认后再进入 Step 5。
+- 修改：扩展 `mcp/tool_manager.py`，新增 `rerank_results(...)`、`rerank_results` Tool Use schema、完整 index permutation 校验和确定性降级；新增 `tests/test_tool_manager_rerank.py`。
+- 触发门槛：只有去重候选数量大于 `top_k` 时才调用 LLM；候选数量不超过 `top_k` 时直接返回原候选集，不产生额外 LLM 调用。
+- 正常路径：Anthropic Tool Use 固定 `temperature=0`、`max_tokens=256`，要求返回完整 `indices` 置换；校验无遗漏、无重复、无越界后按置换重排并返回前 `top_k`，标记 `reranked=True`、`rerank_degraded=False`。
+- 降级路径：LLM 不可用、调用异常、缺失 tool_use 或置换非法时保留原物理召回顺序前 `top_k`，保留错误信息并标记 `reranked=False`、`rerank_degraded=True`。
+- 安全边界：未引入 Cross-Encoder、数值型 rerank score 或 score threshold；不执行任何真实订单、支付、退款或人工坐席写操作。
+- 验证：Step 4.4 专项、Step 4.3 与 Step 4.2 回归共 `21 passed`；全量 pytest `109 passed`；compileall 与 `git diff --check` 通过。
+
+## Checkpoint C/D：RAG 与工具韧性
+
+- [x] Chroma 基础检索、切片和 metadata 通过。
+- [x] Circuit Breaker 5/60、TTL 300、timeout 30 通过。
+- [x] Query Rewrite、并行召回、多级去重和高分保留通过。
+- [x] LLM Rerank 完整置换校验、正常重排和降级状态通过。
+- [x] `progress.md` 与 `architecture.md` 已同步。

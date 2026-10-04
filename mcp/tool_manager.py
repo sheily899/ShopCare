@@ -1,8 +1,8 @@
-"""ShopCare 工具与 RAG 召回前处理基础设施。
+"""ShopCare 工具与 RAG 检索治理基础设施。
 
 本模块属于 MCP/RAG 治理层，负责工具契约、参数校验、超时隔离、内存缓存、
-熔断状态机、fallback、Query Rewrite、并行召回和稳定去重。LLM Rerank、
-真实订单/支付/退款写操作和人工工单系统不属于本模块当前阶段边界。
+熔断状态机、fallback、Query Rewrite、并行召回、稳定去重和 LLM Rerank。
+真实订单/支付/退款写操作和人工工单系统不属于本模块边界。
 """
 
 from __future__ import annotations
@@ -21,6 +21,24 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
+
+
+RERANK_TOOL = {
+    "name": "rerank_results",
+    "description": "根据原始检索问题对候选知识切片排序，只返回完整的候选索引置换。",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "indices": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "候选列表的完整 index permutation，索引从 0 开始。",
+            }
+        },
+        "required": ["indices"],
+        "additionalProperties": False,
+    },
+}
 
 
 class CircuitState(str, Enum):
@@ -270,12 +288,12 @@ class _CacheEntry:
 
 
 class MCPToolManager:
-    """编排工具注册、治理能力和 RAG 召回前处理。
+    """编排工具注册、治理能力和 RAG 检索流水线。
 
     Args:
-        api_key: Anthropic API key；仅在实际执行 Query Rewrite 时惰性创建客户端。
+        api_key: Anthropic API key；仅在实际执行 Query Rewrite/Rerank 时惰性创建客户端。
         base_url: 为兼容后续 LLM 扩展保留的可选参数。
-        model: 为 Query Rewrite 使用的可选模型名。
+        model: 为 Query Rewrite/Rerank 使用的可选模型名。
         clock: 可注入的单调时钟，用于稳定测试 TTL 和熔断冷却。
         client: 可选的异步 Anthropic 客户端，主要用于离线测试和依赖注入。
 
@@ -784,6 +802,135 @@ class MCPToolManager:
             },
         )
 
+    async def rerank_results(
+        self,
+        query: str,
+        candidates: Optional[List[Dict[str, Any]]] = None,
+        top_k: int = 5,
+        *,
+        merged_chunks: Optional[List[Dict[str, Any]]] = None,
+        requested_top_k: Optional[int] = None,
+    ) -> ToolResult:
+        """使用 Anthropic Tool Use 对去重候选进行安全重排序。
+
+        Args:
+            query: 原始知识检索问题，只用于说明排序目标。
+            candidates: 已完成去重的候选知识切片列表。
+            top_k: 调用方希望最终返回的候选数量。
+            merged_chunks: ``candidates`` 的语义别名，兼容编排层命名。
+            requested_top_k: ``top_k`` 的语义别名，兼容设计文档命名。
+
+        Returns:
+            ``ToolResult``；正常排序时返回模型指定顺序的前 ``top_k`` 条，
+            调用失败或置换非法时返回原物理顺序前 ``top_k`` 条并标记降级。
+
+        业务逻辑：只有候选数量超过请求上限才调用 LLM；模型只能返回完整
+        index permutation，任何不完整、重复或越界结果都不能改变原召回顺序。
+        """
+        rows = merged_chunks if merged_chunks is not None else candidates
+        rows = list(rows or [])
+        try:
+            requested = int(requested_top_k if requested_top_k is not None else top_k)
+        except (TypeError, ValueError):
+            requested = 0
+        requested = max(requested, 0)
+        base_metadata = {
+            "query": query,
+            "candidate_count": len(rows),
+            "requested_top_k": requested,
+        }
+
+        # Why：不超过 top_k 时没有排序收益，跳过 LLM 可避免额外延迟和 Token 成本。
+        if len(rows) <= requested:
+            return ToolResult(
+                name="rerank_results",
+                success=True,
+                data=copy.deepcopy(rows),
+                metadata=base_metadata,
+                reranked=False,
+                rerank_degraded=False,
+            )
+
+        client = self._get_llm_client()
+        if client is None:
+            return self._rerank_degraded(rows, requested, base_metadata, "LLM Rerank 客户端不可用")
+
+        candidates_text = json.dumps(
+            [
+                {
+                    "index": index,
+                    "title": item.get("title", ""),
+                    "content": item.get("content", ""),
+                }
+                for index, item in enumerate(rows)
+            ],
+            ensure_ascii=False,
+        )
+        prompt = (
+            "请根据原始检索问题对候选知识切片进行相关性排序。"
+            "只返回 rerank_results 工具要求的完整 index permutation，不要输出解释、分数或其他字段。\n"
+            f"原始检索问题：{query}\n候选切片：{candidates_text}"
+        )
+        try:
+            # Why：temperature=0 与 max_tokens=256 固定输出协议，降低置换结果漂移和解析风险。
+            response = await client.messages.create(
+                model=self.model or "claude-3-5-sonnet-20241022",
+                max_tokens=256,
+                temperature=0,
+                tools=[RERANK_TOOL],
+                tool_choice={"type": "tool", "name": "rerank_results"},
+                extra_body={"thinking": {"type": "disabled"}},
+                messages=[{"role": "user", "content": prompt}],
+            )
+            payload = self._extract_tool_use_input(
+                getattr(response, "content", None),
+                expected_name="rerank_results",
+            )
+            indices = payload.get("indices") if isinstance(payload, dict) else None
+            if not isinstance(indices, list):
+                raise ValueError("Rerank 返回缺少 indices 数组")
+            if len(indices) != len(rows):
+                raise ValueError("Rerank index permutation 长度不完整")
+            if any(not isinstance(index, int) or isinstance(index, bool) for index in indices):
+                raise ValueError("Rerank index permutation 必须全部为整数")
+            # Why：完整置换校验可阻止模型漏项、重复或越界导致候选丢失或错位。
+            if sorted(indices) != list(range(len(rows))):
+                raise ValueError("Rerank index permutation 存在遗漏、重复或越界")
+
+            ordered = [rows[index] for index in indices]
+            metadata = dict(base_metadata)
+            metadata["indices"] = list(indices)
+            return ToolResult(
+                name="rerank_results",
+                success=True,
+                data=copy.deepcopy(ordered[:requested]),
+                metadata=metadata,
+                reranked=True,
+                rerank_degraded=False,
+            )
+        except Exception as exc:
+            logger.warning("LLM Rerank 失败，回退原召回顺序：%s", exc)
+            return self._rerank_degraded(rows, requested, base_metadata, str(exc) or exc.__class__.__name__)
+
+    @staticmethod
+    def _rerank_degraded(
+        rows: List[Dict[str, Any]],
+        requested: int,
+        metadata: Dict[str, Any],
+        error: str,
+    ) -> ToolResult:
+        """返回原召回顺序的确定性 Rerank 降级结果。"""
+        # Why：LLM 排序只是增强能力，失败时保留物理召回顺序可继续提供可用知识。
+        return ToolResult(
+            name="rerank_results",
+            success=True,
+            data=copy.deepcopy(rows[:requested]),
+            error=error,
+            metadata=metadata,
+            reranked=False,
+            rerank_degraded=True,
+        )
+
     def _get_llm_client(self) -> Optional[Any]:
         """惰性获取 Anthropic client；无 key 时不创建网络客户端。"""
         if self._client is not None:
@@ -801,6 +948,23 @@ class MCPToolManager:
         except Exception as exc:
             logger.warning("Anthropic client 初始化失败：%s", exc)
             return None
+
+    @staticmethod
+    def _extract_tool_use_input(content: Any, expected_name: str) -> Dict[str, Any]:
+        """从 Anthropic 响应内容中提取指定 Tool Use 的入参。"""
+        blocks = content if isinstance(content, list) else [content]
+        for block in blocks:
+            if isinstance(block, dict):
+                block_type = block.get("type")
+                name = block.get("name")
+                payload = block.get("input")
+            else:
+                block_type = getattr(block, "type", None)
+                name = getattr(block, "name", None)
+                payload = getattr(block, "input", None)
+            if block_type == "tool_use" and name == expected_name and isinstance(payload, dict):
+                return payload
+        raise ValueError(f"未返回 {expected_name} Tool Use")
 
     @staticmethod
     def _extract_text_content(content: Any) -> str:

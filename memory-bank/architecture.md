@@ -101,7 +101,7 @@ Checkpoint C-1 已完成；Step 3.3 不在 API 路由中提前接入后台任务
 | `tests/test_knowledge_base_embedding.py` | 使用 fake Chroma client 验证 HTTP 失败后的显式日志与 PersistentClient fallback、默认 collection、BGE CPU/normalize 配置、HNSW l2 和旧 collection 迁移。 |
 | `tests/test_knowledge_base_metadata.py` | 验证切片长度上限、七项 metadata 完整性、稳定 `source_chunk_id` 与 `score=round(1-distance,4)` 检索结果；低分结果不因 threshold 被过滤。 |
 
-Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 已完成，Step 4.3/4.4 尚未开始。
+Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker、Step 4.3 的召回前处理和 Step 4.4 的 LLM Rerank 均已完成。
 
 ### Step 4.1 知识源文本与初始化脚本
 
@@ -127,7 +127,7 @@ Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 已完成，St
 | `scripts/init_knowledge_base.py` | 复用带标题上下文的切片器，校验七项 metadata、统计最大 chunk 长度，并输出文档数、chunk 数和耗时。 |
 | `tests/test_knowledge_base_chunking.py` | 验证六篇文档生成 16–22 个 chunk、面包屑、500 字符上限、metadata 完整性及 401 专属片段召回。 |
 
-本次升级实测六篇源文档生成 18 个 chunk，最大长度 244 字符；Step 4.2 已在后续完成，Step 4.3/4.4 仍未开始。
+本次升级实测六篇源文档生成 18 个 chunk，最大长度 244 字符；Step 4.2、Step 4.3 和 Step 4.4 已在后续完成。
 
 ### Step 4.1 回归修复：Chroma 本地 fallback 设置隔离
 
@@ -152,10 +152,10 @@ Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 已完成，St
 
 | 文件 | 职责 |
 | --- | --- |
-| `mcp/tool_manager.py` | 提供 `Tool`/`ToolResult`/`ToolStats` dataclass 契约；按 Cache → Breaker → 参数校验 → `asyncio.wait_for` → 统计/状态更新 → fallback 或成功缓存的顺序执行工具。使用标准库 `OrderedDict` 实现 5000 条容量、1250 条批量淘汰和 TTL；实现 5 次失败、60 秒冷却、半开探测的三态熔断。 |
+| `mcp/tool_manager.py` | 提供 `Tool`/`ToolResult`/`ToolStats` dataclass 契约；按 Cache → Breaker → 参数校验 → `asyncio.wait_for` → 统计/状态更新 → fallback 或成功缓存的顺序执行工具。使用标准库 `OrderedDict` 实现 5000 条容量、1250 条批量淘汰和 TTL；实现 5 次失败、60 秒冷却、半开探测的三态熔断；后续增加 Query Rewrite、并行召回、稳定去重和 LLM Rerank。 |
 | `tests/test_tool_manager_circuit.py` | 覆盖五次失败、60 秒恢复、半开探测失败、超时、参数校验不污染熔断、TTL 命中、5000/1250 淘汰和 fallback 保留原 error。异步测试使用标准库 `asyncio.run`，未新增 pytest 插件依赖。 |
 
-验证：Step 4.2 专项测试 `7 passed`；全量 pytest `95 passed`。Step 4.3 已在后续完成，Step 4.4 的 LLM Rerank 尚未开始。
+验证：Step 4.2 专项测试 `7 passed`；全量 pytest 在 Step 4.4 完成后为 `109 passed`。
 
 ## Step 4.3：Query Rewrite、并行召回与稳定去重
 
@@ -166,4 +166,15 @@ Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 已完成，St
 
 去重优先级固定为 `source_chunk_id`、`content_hash`、`runtime_id`、content SHA256；同一 identity 保留较高 score，不同 identity 保留首次出现顺序，无 identity 的结果不强行合并。Step 4.3 返回完整去重候选集，不执行最终 Top-K、不调用 Rerank，也不设置 score threshold。
 
-验证：Step 4.3 专项测试 `9 passed`；Step 4.2 回归 `7 passed`；全量 pytest `104 passed`；compileall 与 `git diff --check` 通过。Step 4.4 LLM Rerank 仍未开始。
+验证：Step 4.3 专项测试 `9 passed`；Step 4.2 回归 `7 passed`；在 Step 4.4 完成前全量 pytest 为 `104 passed`；compileall 与 `git diff --check` 通过。
+
+## Step 4.4：LLM Rerank 与降级状态机
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `mcp/tool_manager.py` | 新增 `RERANK_TOOL` Tool Use schema 与 `rerank_results(...)` 异步方法。只有候选数量超过 `top_k` 才触发 LLM；固定 `temperature=0`、`max_tokens=256`，要求返回完整 `indices` index permutation，并校验长度、类型、遗漏、重复和越界。合法置换按模型顺序重排并截取前 `top_k`；LLM 不可用、调用异常或协议非法时保留原物理召回顺序前 `top_k`，设置 `rerank_degraded=True` 并保留错误信息。 |
+| `tests/test_tool_manager_rerank.py` | 使用 fake Anthropic client 验证候选未超限时跳过 LLM、合法置换重排、网络异常降级、非法 index 降级、tool_use 缺失和无 score threshold 行为。 |
+
+Rerank 只消费 Step 4.3 已完成去重的候选列表，不引入 Cross-Encoder、不产生数值型 rerank score，也不设置 Chroma score threshold。Step 4.3 的 `search_with_rewrite` 仍保持完整候选集语义，具体 Rerank 由调用方显式使用 `rerank_results(...)`。
+
+验证：Step 4.4 专项、Step 4.3 和 Step 4.2 回归共 `21 passed`；全量 pytest `109 passed`；compileall 与 `git diff --check` 通过。
