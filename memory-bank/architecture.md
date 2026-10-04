@@ -273,3 +273,32 @@ Step 5.3 只提供结构化上下文快照，不执行任何真实工单、订�
 - API 层不向订单、支付、退款、工单或人工坐席系统发起网络调用；Step 7.2 的 `/health`、`/chat` 和记忆回写尚未实现。
 
 验证：Step 7.1 专项 `3 passed`；全量 pytest `149 passed`；`compileall api tests` 与 `git diff --check` 通过。
+
+## Step 7.2：/health、/chat 与记忆时序闭环
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `api/main.py` | 新增 `GET /health` 与 `POST /chat`。`/health` 检查 lifespan ready 状态并返回 Agent 统计、产品 collection/model/doc_count；`/chat` 严格执行上下文读取、最近 5 条历史意图识别、内部 Request 装配、AgentOrchestrator 执行、USER/ASSISTANT 消息写回、画像后台任务和完整 ChatResponse 映射。 |
+| `memory/conversation_memory.py` | 新增 `MemoryManager.get_context`，统一读取 Redis 摘要、最多 20 条工作记忆、最多 5 条 episodic 历史和 user_profile，返回 `MemoryContext`；各存储层故障只返回安全空值。 |
+| `tests/test_chat_integration.py` | 使用 fake Redis/Chroma/Memory/Recognizer/Orchestrator 覆盖 `/health` 正常与 503、/chat 完整响应、最近 5 条历史、消息写回顺序和画像任务失败隔离。 |
+
+### 主链路与安全边界
+
+```text
+ChatRequest
+  -> conv_id/request_id
+  -> MemoryManager.get_context
+  -> recent_messages[-5:] + IntentRecognizer.recognize_intent
+  -> agents.Request
+  -> AgentOrchestrator.run
+  -> add_message(USER) -> add_message(ASSISTANT)
+  -> create_task(update_profile) + done callback
+  -> ChatResponse
+```
+
+- `knowledge_required` 由意图门控决定并进入内部 Request；知识检索仍由 Step 6.2 编排层负责，API 不复制 RAG 算法。
+- ChatResponse 的 intent、Agent、routing、tools、handoff、latency、knowledge、entities、source scores 和 diagnostics 均从内部结果映射，不伪造外部订单、支付、退款或人工接入状态。
+- `/health` 的 collection count 通过 `asyncio.to_thread` 读取，避免阻塞事件循环；未就绪时不返回 healthy。
+- 画像更新是非阻塞增强任务；任务失败只写日志，不影响已完成的 HTTP 响应。
+
+验证：Step 7.2 专项 `4 passed`；记忆与集成回归 `19 passed`；全量 pytest `153 passed`；`compileall api tests` 与 `git diff --check` 通过。

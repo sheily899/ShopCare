@@ -11,9 +11,11 @@ from contextlib import asynccontextmanager
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Mapping, Optional
+import uuid
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
 from agents.agent_orchestrator import (
@@ -22,12 +24,13 @@ from agents.agent_orchestrator import (
     BillingAgent,
     EscalationAgent,
     GeneralAgent,
+    Request,
     TechnicalAgent,
 )
-from core.intent_recognizer import recognize_intent
+from core.intent_recognizer import IntentCategory, recognize_intent
 from mcp.knowledge_base import KnowledgeBase
 from mcp.tool_manager import MCPToolManager, Tool
-from memory.conversation_memory import MemoryManager
+from memory.conversation_memory import MemoryContext, MemoryManager, MsgRole
 
 
 logger = logging.getLogger(__name__)
@@ -58,6 +61,19 @@ class IntentRecognizer:
         """
 
         return await recognize_intent(message, history=history)
+
+    async def recognize_intent(self, message: str, history: Any = None) -> Any:
+        """兼容 API 主链路约定的 ``recognize_intent`` 方法名。
+
+        Args:
+            message: 待识别的用户消息。
+            history: 最近会话消息列表。
+
+        Returns:
+            核心模块返回的 ``IntentResult`` dataclass。
+        """
+
+        return await self.recognize(message, history)
 
 
 class SkillManager:
@@ -434,3 +450,327 @@ class ChatResponse(BaseModel):
     intent_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     intent_source_scores: Dict[str, float] = Field(default_factory=dict)
     intent_diagnostics: Dict[str, Any] = Field(default_factory=dict)
+
+
+async def _maybe_await(value: Any) -> Any:
+    """统一处理真实组件与同步测试替身的返回值。"""
+
+    if hasattr(value, "__await__"):
+        return await value
+    return value
+
+
+async def _load_memory_context(
+    memory_manager: Any,
+    user_id: str,
+    conv_id: str,
+    query: str,
+) -> MemoryContext:
+    """读取会话上下文，并在记忆组件不可用时返回空上下文。
+
+    Args:
+        memory_manager: 生命周期装配的 MemoryManager 或测试替身。
+        user_id: 用户标识。
+        conv_id: 会话标识。
+        query: 当前查询，用于情景记忆召回。
+
+    Returns:
+        ``MemoryContext``；存储异常只影响上下文增强，不伪造历史消息。
+    """
+
+    get_context = getattr(memory_manager, "get_context", None)
+    if callable(get_context):
+        try:
+            context = await _maybe_await(get_context(user_id, conv_id, query))
+            if isinstance(context, MemoryContext):
+                return context
+            if isinstance(context, Mapping):
+                return MemoryContext(
+                    summary=str(context.get("summary", "")),
+                    recent_messages=list(context.get("recent_messages", [])),
+                    relevant_history=list(context.get("relevant_history", [])),
+                    user_profile=dict(context.get("user_profile", {})),
+                )
+        except Exception as exc:
+            logger.warning("读取会话上下文失败，使用空上下文：%s", exc)
+    get_recent = getattr(memory_manager, "get_recent_messages", None)
+    if callable(get_recent):
+        try:
+            recent = await _maybe_await(get_recent(user_id, conv_id, limit=20))
+            return MemoryContext(recent_messages=list(recent or []))
+        except Exception as exc:
+            logger.warning("读取工作记忆失败，使用空上下文：%s", exc)
+    return MemoryContext()
+
+
+async def _recognize_request(
+    recognizer: Any,
+    message: str,
+    history: List[Any],
+) -> Any:
+    """调用注入的意图识别器，兼容 Step7.1 适配器和离线替身。"""
+
+    method = getattr(recognizer, "recognize_intent", None)
+    if not callable(method):
+        method = getattr(recognizer, "recognize", None)
+    if not callable(method):
+        return await recognize_intent(message, history=history)
+    return await _maybe_await(method(message, history))
+
+
+def _intent_value(intent: Any, default: str = "other") -> str:
+    """将枚举或兼容字符串转换为 API 可序列化值。"""
+
+    raw = getattr(intent, "value", intent)
+    return str(raw or default)
+
+
+def _should_use_knowledge(intent: Any) -> bool:
+    """按业务意图门控是否需要知识库证据。"""
+
+    value = _intent_value(intent)
+    return value not in {
+        IntentCategory.GREETING.value,
+        IntentCategory.FEEDBACK.value,
+        IntentCategory.OTHER.value,
+        IntentCategory.HUMAN_HANDOFF.value,
+    }
+
+
+def _agent_stats(orchestrator: Any) -> Dict[str, Any]:
+    """读取编排器公开统计；旧版编排器无 get_stats 时从 Agent 池汇总。"""
+
+    get_stats = getattr(orchestrator, "get_stats", None)
+    if callable(get_stats):
+        try:
+            stats = get_stats()
+            if isinstance(stats, Mapping):
+                return dict(stats)
+        except Exception as exc:
+            logger.warning("读取 Agent 统计失败：%s", exc)
+    pool = getattr(orchestrator, "agent_pool", {})
+    result: Dict[str, Any] = {}
+    if isinstance(pool, Mapping):
+        for agent_type, agent in pool.items():
+            stats = getattr(agent, "stats", None)
+            if stats is None:
+                continue
+            key = _intent_value(agent_type, str(agent_type))
+            result[key] = {
+                "total": int(getattr(stats, "total", 0)),
+                "success": int(getattr(stats, "success", 0)),
+                "success_rate": float(getattr(stats, "success_rate", 0.0)),
+                "avg_ms": float(getattr(stats, "avg_ms", 0.0)),
+            }
+    return result
+
+
+async def _knowledge_metadata(knowledge_base: Any) -> Dict[str, Any]:
+    """读取知识库 collection/model/doc_count 元数据。"""
+
+    collection = getattr(knowledge_base, "_collection", None)
+    count = getattr(collection, "count", None)
+    doc_count = 0
+    if callable(count):
+        try:
+            doc_count = int(await asyncio.to_thread(count))
+        except Exception as exc:
+            logger.warning("读取知识库文档数失败：%s", exc)
+    return {
+        "collection_name": str(getattr(knowledge_base, "collection_name", "")),
+        "embedding_model": str(getattr(knowledge_base, "embedding_model", "")),
+        "doc_count": doc_count,
+    }
+
+
+def _consume_profile_task(task: asyncio.Task[Any]) -> None:
+    """消费后台画像任务异常，避免任务异常冒泡到事件循环。"""
+
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        # Why：画像更新是非阻塞增强能力，异常不能冒泡导致用户已完成请求变成白屏。
+        logger.warning("后台用户画像更新失败，已隔离：%s", exc)
+
+
+def _schedule_profile_update(memory_manager: Any, user_id: str, conv_id: str) -> None:
+    """创建并登记画像异步更新任务，不让后台异常改变 HTTP 响应。"""
+
+    update_profile = getattr(memory_manager, "update_profile", None)
+    if not callable(update_profile):
+        return
+    try:
+        coroutine = update_profile(user_id, conv_id)
+        task = asyncio.create_task(coroutine)
+        task.add_done_callback(_consume_profile_task)
+    except Exception as exc:
+        logger.warning("创建后台用户画像任务失败，已隔离：%s", exc)
+        close = getattr(coroutine, "close", None) if "coroutine" in locals() else None
+        if callable(close):
+            close()
+
+
+@app.get("/health")
+async def health() -> Dict[str, Any]:
+    """返回核心组件就绪状态、Agent 统计和产品知识库元数据。
+
+    Returns:
+        健康状态 JSON；组件尚未完成 lifespan 装配时返回 HTTP 503。
+
+    Raises:
+        HTTPException: 应用未就绪时返回 503，避免伪造 healthy 状态。
+    """
+
+    if not getattr(app.state, "ready", False):
+        raise HTTPException(status_code=503, detail="ShopCare 尚未就绪")
+    orchestrator = getattr(app.state, "agent_orchestrator", None)
+    knowledge_base = getattr(app.state, "knowledge_base", None)
+    if orchestrator is None or knowledge_base is None:
+        raise HTTPException(status_code=503, detail="核心组件未完整装配")
+    return {
+        "status": "healthy",
+        "agent_stats": _agent_stats(orchestrator),
+        "knowledge_base": await _knowledge_metadata(knowledge_base),
+    }
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(chat_request: ChatRequest) -> ChatResponse:
+    """执行一次上下文读取、意图识别、编排、记忆写回和画像后台更新。
+
+    Args:
+        chat_request: 已通过 Pydantic 边界校验的用户请求。
+
+    Returns:
+        完整的 ``ChatResponse``；画像后台任务失败不改变已生成响应。
+
+    Raises:
+        HTTPException: lifespan 未装配核心组件时返回 503。
+    """
+
+    if not getattr(app.state, "ready", False):
+        raise HTTPException(status_code=503, detail="ShopCare 尚未就绪")
+    started = time.perf_counter()
+    conv_id = chat_request.conv_id or str(uuid.uuid4())
+    request_id = str(uuid.uuid4())[:8]
+    memory_manager = app.state.memory_manager
+    context = await _load_memory_context(
+        memory_manager,
+        chat_request.user_id,
+        conv_id,
+        chat_request.message,
+    )
+    # 只把最近 5 条交给意图识别，避免历史上下文挤占分类输入预算。
+    history = list(context.recent_messages[-5:])
+    intent_result = await _recognize_request(
+        app.state.intent_recognizer,
+        chat_request.message,
+        history,
+    )
+    intent = getattr(intent_result, "intent", IntentCategory.OTHER)
+    diagnostics = dict(getattr(intent_result, "intent_diagnostics", {}) or {})
+    knowledge_required = bool(diagnostics.get("knowledge_required", _should_use_knowledge(intent)))
+    internal_request = Request(
+        message=chat_request.message,
+        user_id=chat_request.user_id,
+        conv_id=conv_id,
+        context=context.to_prompt_text(),
+        history=history,
+        entities=dict(getattr(intent_result, "entities", {}) or {}),
+        intent=intent,
+        intent_group=getattr(intent_result, "intent_group", None),
+        urgency=getattr(intent_result, "urgency", None),
+        intent_confidence=float(getattr(intent_result, "confidence", 0.0)),
+        request_id=request_id,
+        intent_diagnostics=diagnostics,
+        secondary_intents=list(getattr(intent_result, "secondary_intents", []) or []),
+        knowledge_required=knowledge_required,
+    )
+    result = await _maybe_await(app.state.agent_orchestrator.run(internal_request))
+    await _safe_add_message(
+        memory_manager,
+        chat_request.user_id,
+        conv_id,
+        MsgRole.USER,
+        chat_request.message,
+    )
+    await _safe_add_message(
+        memory_manager,
+        chat_request.user_id,
+        conv_id,
+        MsgRole.ASSISTANT,
+        str(getattr(result, "response", "")),
+    )
+    _schedule_profile_update(memory_manager, chat_request.user_id, conv_id)
+
+    result_intent = getattr(result, "intent", intent)
+    result_secondary = list(getattr(result, "secondary_intents", []) or [])
+    if not result_secondary:
+        result_secondary = list(getattr(intent_result, "secondary_intents", []) or [])
+    result_agents = list(getattr(result, "agent_types", []) or [])
+    primary_agent = getattr(result, "primary_agent", None)
+    if not result_agents and primary_agent is not None:
+        result_agents = [primary_agent]
+    tool_traces = list(getattr(result, "tool_traces", []) or [])
+    response_diagnostics = dict(diagnostics)
+    response_diagnostics.update(dict(getattr(result, "intent_diagnostics", {}) or {}))
+    response_diagnostics["memory_context_loaded"] = bool(context.to_prompt_text())
+    response_diagnostics["knowledge_required"] = knowledge_required
+    knowledge_used = knowledge_required or any(
+        isinstance(trace, Mapping) and trace.get("retrieval_stage")
+        for trace in tool_traces
+    )
+    return ChatResponse(
+        conv_id=conv_id,
+        request_id=str(getattr(result, "request_id", "") or request_id),
+        response=str(getattr(result, "response", "")),
+        intent=_intent_value(result_intent),
+        secondary_intents=[_intent_value(value) for value in result_secondary],
+        intent_group=str(getattr(intent_result, "intent_group", "other") or "other"),
+        agent_type=_intent_value(getattr(result, "agent_type", AgentType.GENERAL)),
+        agent_types=[_intent_value(value) for value in result_agents],
+        primary_agent=_intent_value(primary_agent, "") if primary_agent is not None else "",
+        supporting_agents=[
+            _intent_value(value)
+            for value in list(getattr(result, "supporting_agents", []) or [])
+        ],
+        tools_used=list(getattr(result, "tools_used", []) or []),
+        routing_reason=str(getattr(result, "routing_reason", "") or ""),
+        routing_confidence=float(getattr(result, "routing_confidence", 0.0) or 0.0),
+        escalated=bool(getattr(result, "escalated", False)),
+        agent_recommended_handoff=bool(
+            getattr(result, "agent_recommended_handoff", False)
+        ),
+        latency_ms=max(
+            0.0,
+            float(
+                getattr(result, "latency_ms", 0.0)
+                or ((time.perf_counter() - started) * 1000)
+            ),
+        ),
+        knowledge_used=knowledge_used,
+        entities=dict(getattr(intent_result, "entities", {}) or {}),
+        intent_confidence=float(getattr(intent_result, "confidence", 0.0) or 0.0),
+        intent_source_scores=dict(getattr(intent_result, "source_scores", {}) or {}),
+        intent_diagnostics=response_diagnostics,
+    )
+
+
+async def _safe_add_message(
+    memory_manager: Any,
+    user_id: str,
+    conv_id: str,
+    role: MsgRole,
+    content: str,
+) -> None:
+    """按时序写入一条消息，并隔离底层存储异常。"""
+
+    add_message = getattr(memory_manager, "add_message", None)
+    if not callable(add_message):
+        return
+    try:
+        await _maybe_await(add_message(user_id, conv_id, role, content))
+    except Exception as exc:
+        logger.warning("%s 消息写入失败，继续返回响应：%s", role.value, exc)

@@ -341,6 +341,48 @@ class MemoryManager:
             logger.error("工作记忆读取失败: %s", exc)
             return []
 
+    async def get_context(
+        self,
+        user_id: str,
+        conv_id: str,
+        query: Optional[str] = None,
+    ) -> MemoryContext:
+        """按 API 主链路顺序组装摘要、近期消息、情景历史和用户画像。
+
+        Args:
+            user_id: 用户标识。
+            conv_id: 会话标识。
+            query: 当前查询，用于情景记忆召回；可为空。
+
+        Returns:
+            可直接注入意图识别和 Agent Prompt 的 ``MemoryContext``。任一存储层
+            失败只返回该层已有的安全空值，不伪造历史内容。
+        """
+
+        recent_messages = await self.get_recent_messages(user_id, conv_id, limit=self.WORKING_MAX)
+        summary = ""
+        try:
+            getter = getattr(self._redis, "get", None)
+            if callable(getter):
+                raw_summary = getter(self._summary_key(user_id, conv_id))
+                summary_value = await raw_summary if inspect.isawaitable(raw_summary) else raw_summary
+                summary = str(summary_value or "")
+        except Exception as exc:
+            logger.warning("读取会话摘要失败：%s", exc)
+        relevant_history = await self.get_episodic_context(
+            user_id,
+            conv_id,
+            query=query,
+            limit=self.HISTORY_TOP_K,
+        )
+        user_profile = await self.get_user_profile(user_id)
+        return MemoryContext(
+            summary=summary,
+            recent_messages=recent_messages,
+            relevant_history=relevant_history,
+            user_profile=user_profile,
+        )
+
     async def _get_working_memory(
         self, user_id: str, conv_id: str, limit: int = WORKING_MAX
     ) -> List[Message]:

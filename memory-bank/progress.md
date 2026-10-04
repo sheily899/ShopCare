@@ -271,3 +271,13 @@
 - 安全边界：启动阶段不访问订单、支付、退款、工单或人工坐席系统；当前 PerformanceMonitor 与 EndToEndEvaluator 仅完成生命周期装配，详细监控与评测流水线分别留待 Step 8、Step 9。
 - 验证：`.venv\Scripts\python.exe -m pytest tests/test_api_lifespan.py -q` → `3 passed`；全量 pytest → `149 passed`；`compileall api tests` 与 `git diff --check` 通过。
 - 边界：未实现 `/health`、`/chat`、记忆回写与支持性 API 路由；Step 7.2 未开始。
+
+## Step 7.2：/health、/chat 与记忆时序闭环
+
+- 状态：已完成，等待人工确认后再进入 Step 7.3。
+- 修改：扩展 `api/main.py`，新增 `GET /health`、`POST /chat`、上下文读取兼容层、意图识别调用、内部 `Request` 装配、ChatResponse 全字段映射、消息安全写回和画像后台任务异常消费；扩展 `memory/conversation_memory.py`，新增 `MemoryManager.get_context` 统一组装摘要、近期消息、情景历史和画像；新增 `tests/test_chat_integration.py`。
+- `/health`：未就绪返回 503；就绪时返回 status、Agent stats 以及 collection_name、embedding_model、doc_count。
+- `/chat` 时序：分配/继承 conv_id → `get_context` → 最近 5 条历史意图识别 → 内部 Request → `orchestrator.run` → USER/ASSISTANT 工作记忆写回 → `asyncio.create_task(update_profile)` → 完整 ChatResponse。
+- 异常边界：记忆读写失败只记录 warning 并保留响应链路；画像任务通过 done callback 消费异常，禁止后台异常冒泡改变 HTTP 响应。
+- 验证：`.venv\Scripts\python.exe -m pytest tests/test_chat_integration.py -q` → `4 passed`；记忆与集成回归 → `19 passed`；全量 pytest → `153 passed`；compileall 与 `git diff --check` 通过。
+- 边界：未实现 `/search`、知识上传、trace/supporting routes、监控路由和评测路由；Step 7.3 未开始。
