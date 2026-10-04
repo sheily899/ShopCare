@@ -120,3 +120,14 @@
 - [x] episodic 摘要压缩与两级召回通过。
 - [x] user_profile 异步写回、严格校验与读取兜底通过。
 - [x] `progress.md` 与 `architecture.md` 已同步。
+
+## Step 4.1：KnowledgeBase 初始化与文档切片
+
+- 状态：已完成，等待人工确认后再进入 Step 4.2。
+- 创建：`mcp/knowledge_base.py`、`tests/test_knowledge_base_embedding.py`、`tests/test_knowledge_base_metadata.py`。
+- Chroma：HTTP client 优先读取 `CHROMA_HOST`/`CHROMA_PORT`；连接失败时显式记录 warning 并 fallback 到 `PersistentClient`，默认路径为 `.data/chroma`；新 `knowledge_base_zh` 为空时支持迁移旧 `knowledge_base`。
+- Embedding：默认 `BAAI/bge-small-zh-v1.5`，固定 `device="cpu"`、`normalize_embeddings=True`；collection metadata 固定 `hnsw:space=l2`。
+- 切片与元数据：按换行和句子边界切片，单片最多 500 字符；每片写入 `title`、`source_document_id`、`source_chunk_id`、`content_hash`、`chunk_index`、`total_chunks`、`corpus_version` 七项字段。
+- 检索：返回 `title`、`content`、`score`、`id` 与稳定 chunk 身份；`score=round(1-distance,4)`，不设置 score threshold，也不将 score 解释为概率。
+- 验证：`.venv\Scripts\python.exe -m pytest -q tests/test_knowledge_base_embedding.py tests/test_knowledge_base_metadata.py` → `5 passed`；全量 pytest → `82 passed`；compileall 与 `git diff --check` 通过。
+- 边界：未实现 ToolManager、缓存、CircuitBreaker、Query Rewrite、并行召回或 Rerank；下一步等待进入 Step 4.2。

@@ -92,3 +92,13 @@ Step 3.2 仍不包含用户画像集合、画像异步后台写回或 Step 3.3 �
 | `tests/test_memory_profile_async.py` | 使用 Fake Redis、LLM 和 Chroma collection 验证画像正常提取、固定 LLM 参数、稳定主键与元数据、畸变 JSON 防覆盖、后台异常隔离、画像读取和默认空结构。 |
 
 Checkpoint C-1 已完成；Step 3.3 不在 API 路由中提前接入后台任务，也不包含 Step 4 的知识库检索和工具断路器。
+
+## Step 4.1：KnowledgeBase 初始化与文档切片
+
+| 文件 | 职责 |
+| --- | --- |
+| `mcp/knowledge_base.py` | 提供产品知识库的 Chroma HTTP 优先连接、本地 PersistentClient fallback、`knowledge_base_zh` collection 初始化、旧 `knowledge_base` 迁移、BGE CPU/归一化 embedding 配置、500 字符文档切片、七项 chunk metadata 和基础向量检索；不包含 ToolManager、缓存、熔断、Query Rewrite 或 Rerank。 |
+| `tests/test_knowledge_base_embedding.py` | 使用 fake Chroma client 验证 HTTP 失败后的显式日志与 PersistentClient fallback、默认 collection、BGE CPU/normalize 配置、HNSW l2 和旧 collection 迁移。 |
+| `tests/test_knowledge_base_metadata.py` | 验证切片长度上限、七项 metadata 完整性、稳定 `source_chunk_id` 与 `score=round(1-distance,4)` 检索结果；低分结果不因 threshold 被过滤。 |
+
+Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 尚未开始。

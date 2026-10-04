@@ -1,0 +1,471 @@
+"""ShopCare 产品知识库基础设施。
+
+本模块属于 MCP/RAG 基础层，负责 ChromaDB 客户端初始化、知识文档切片、
+七项切片元数据写入和基础向量检索。它不负责 ToolManager、缓存、熔断、
+Query Rewrite 或 Rerank，也不连接任何真实订单或支付系统。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+import re
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+logger = logging.getLogger(__name__)
+
+try:  # 依赖可能只在运行环境安装，保持纯切片测试可导入。
+    import chromadb as chromadb  # type: ignore
+except Exception:  # pragma: no cover - 由运行环境决定
+    chromadb = None  # type: ignore
+
+
+DEFAULT_COLLECTION_NAME = "knowledge_base_zh"
+LEGACY_COLLECTION_NAME = "knowledge_base"
+DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
+DEFAULT_PERSIST_DIRECTORY = ".data/chroma"
+DEFAULT_CORPUS_VERSION = "kb-v1-default"
+CHUNK_SIZE = 500
+HNSW_SPACE = "l2"
+
+
+def _load_chromadb() -> Any:
+    """惰性加载 ChromaDB SDK，避免切片和契约测试被可选依赖阻塞。
+
+    Returns:
+        已加载的 ``chromadb`` 模块。
+
+    Raises:
+        RuntimeError: 当前环境无法导入 ChromaDB 时抛出。
+    """
+    global chromadb
+    if chromadb is not None:
+        return chromadb
+    try:
+        import chromadb as chromadb_module  # type: ignore
+    except Exception as exc:  # pragma: no cover - 由运行环境决定
+        raise RuntimeError(f"ChromaDB SDK 不可用: {exc}") from exc
+    chromadb = chromadb_module
+    return chromadb_module
+
+
+def _chroma_settings(module: Any) -> Any:
+    """构造关闭匿名 telemetry 的 Chroma 设置对象（若 SDK 支持）。
+
+    Args:
+        module: 已加载的 ChromaDB 模块或测试替身。
+
+    Returns:
+        SDK ``Settings`` 实例；不支持该类时返回 ``None``。
+    """
+    settings_cls = getattr(module, "Settings", None)
+    if settings_cls is None:
+        return None
+    try:
+        return settings_cls(anonymized_telemetry=False)
+    except TypeError:
+        return settings_cls()
+
+
+def build_embedding_function(model_name: str = DEFAULT_EMBEDDING_MODEL) -> Any:
+    """构建固定 CPU、归一化的 BGE SentenceTransformer embedding function。
+
+    Args:
+        model_name: 使用的 SentenceTransformer 模型名。
+
+    Returns:
+        Chroma 可接受的 ``SentenceTransformerEmbeddingFunction``。
+
+    Raises:
+        RuntimeError: Chroma embedding function 依赖不可用时抛出。
+    """
+    try:
+        module = _load_chromadb()
+        embedding_functions = module.utils.embedding_functions
+        return embedding_functions.SentenceTransformerEmbeddingFunction(
+            model_name=model_name,
+            device="cpu",
+            normalize_embeddings=True,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"SentenceTransformer embedding 初始化失败: {exc}") from exc
+
+
+class KnowledgeBase:
+    """提供 ShopCare 产品知识库的初始化、切片写入和基础检索。
+
+    HTTP Chroma 是首选连接方式；HTTP 服务不可用时才退回本地
+    ``PersistentClient``，并通过 warning 日志显式暴露该降级。
+
+    Args:
+        chroma_host: HTTP Chroma 主机；未传入时读取 ``CHROMA_HOST``，默认 localhost。
+        chroma_port: HTTP Chroma 端口；未传入时读取 ``CHROMA_PORT``，默认 8000。
+        chroma_path: 本地持久化目录；未传入时读取 ``CHROMA_PERSIST_DIRECTORY``。
+        embedding_model: BGE 模型名；未传入时读取 ``CUSTOMEROPS_EMBEDDING_MODEL``。
+        collection_name: 产品知识库 collection；未传入时读取 ``CUSTOMEROPS_KB_COLLECTION``。
+        embedding_function: 可选注入的 embedding function，便于离线测试。
+        client: 可选注入的 Chroma client，便于离线测试。
+    """
+
+    COLLECTION_NAME = DEFAULT_COLLECTION_NAME
+    LEGACY_COLLECTION_NAME = LEGACY_COLLECTION_NAME
+    EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL
+    CHUNK_SIZE = CHUNK_SIZE
+
+    def __init__(
+        self,
+        chroma_host: Optional[str] = None,
+        chroma_port: Optional[int] = None,
+        chroma_path: Optional[str] = None,
+        embedding_model: Optional[str] = None,
+        collection_name: Optional[str] = None,
+        embedding_function: Any = None,
+        client: Any = None,
+    ) -> None:
+        """初始化 Chroma client、embedding function 和产品 collection。
+
+        Args:
+            chroma_host: HTTP Chroma 主机覆盖值。
+            chroma_port: HTTP Chroma 端口覆盖值。
+            chroma_path: PersistentClient 路径覆盖值。
+            embedding_model: embedding 模型覆盖值。
+            collection_name: collection 名称覆盖值。
+            embedding_function: 测试或调用方注入的 embedding function。
+            client: 注入后跳过 HTTP/PersistentClient 创建的 Chroma client。
+        """
+        self.chroma_host = (chroma_host or os.getenv("CHROMA_HOST", "localhost")).strip()
+        self.chroma_port = int(chroma_port or os.getenv("CHROMA_PORT", "8000"))
+        self.chroma_path = (
+            chroma_path
+            or os.getenv("CHROMA_PERSIST_DIRECTORY", DEFAULT_PERSIST_DIRECTORY)
+        ).strip()
+        self.embedding_model = (
+            embedding_model
+            or os.getenv("CUSTOMEROPS_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
+        ).strip()
+        self.collection_name = (
+            collection_name
+            or os.getenv("CUSTOMEROPS_KB_COLLECTION", DEFAULT_COLLECTION_NAME)
+        ).strip()
+        self._embedding_function = embedding_function or build_embedding_function(
+            self.embedding_model
+        )
+        self._use_server = False
+        self._client = client or self._connect_client()
+        self._collection = self._client.get_or_create_collection(
+            name=self.collection_name,
+            metadata={
+                "description": "ShopCare 产品知识库",
+                "embedding_model": self.embedding_model,
+                "hnsw:space": HNSW_SPACE,
+            },
+            embedding_function=self._embedding_function,
+        )
+        self._migrate_legacy_if_needed()
+
+    def _connect_client(self) -> Any:
+        """按 HTTP 优先、PersistentClient fallback 的顺序创建 Chroma client。
+
+        Returns:
+            已连接的 Chroma client。
+
+        Raises:
+            RuntimeError: Chroma SDK 不可用或 HTTP 与本地客户端均创建失败。
+        """
+        module = _load_chromadb()
+        settings = _chroma_settings(module)
+        http_kwargs: Dict[str, Any] = {
+            "host": self.chroma_host,
+            "port": self.chroma_port,
+        }
+        if settings is not None:
+            http_kwargs["settings"] = settings
+        try:
+            http_client = module.HttpClient(**http_kwargs)
+            heartbeat = getattr(http_client, "heartbeat", None)
+            if callable(heartbeat):
+                heartbeat()
+            self._use_server = True
+            logger.info(
+                "知识库 Chroma HTTP 已连接: %s:%s",
+                self.chroma_host,
+                self.chroma_port,
+            )
+            return http_client
+        except Exception as exc:
+            # HTTP 失败必须显式暴露，PersistentClient 只作为本地可用性降级而非静默替代。
+            logger.warning(
+                "知识库 Chroma HTTP 连接失败，fallback 到 PersistentClient: "
+                "host=%s port=%s path=%s error=%s",
+                self.chroma_host,
+                self.chroma_port,
+                self.chroma_path,
+                exc,
+            )
+        persistent_kwargs: Dict[str, Any] = {"path": self.chroma_path}
+        if settings is not None:
+            persistent_kwargs["settings"] = settings
+        try:
+            return module.PersistentClient(**persistent_kwargs)
+        except Exception as exc:
+            raise RuntimeError(f"Chroma HTTP 与 PersistentClient 均不可用: {exc}") from exc
+
+    def _migrate_legacy_if_needed(self) -> int:
+        """当新 collection 为空时迁移旧 ``knowledge_base`` 的文档。
+
+        Returns:
+            迁移的文档片段数量；无旧数据或新 collection 非空时返回 0。
+        """
+        count_method = getattr(self._collection, "count", None)
+        if callable(count_method) and count_method() != 0:
+            return 0
+        try:
+            legacy = self._client.get_collection(name=self.LEGACY_COLLECTION_NAME)
+            data = legacy.get(include=["documents", "metadatas"])
+            documents = list(data.get("documents") or [])
+            ids = list(data.get("ids") or [])
+            metadatas = list(data.get("metadatas") or [])
+            if not documents:
+                return 0
+            migrated_ids: List[str] = []
+            migrated_metas: List[Dict[str, Any]] = []
+            for index, content in enumerate(documents):
+                metadata = metadatas[index] if index < len(metadatas) else {}
+                migrated_ids.append(
+                    str(ids[index]) if index < len(ids) and ids[index] else self._runtime_id(
+                        str(metadata.get("title", "legacy")), index, str(content)
+                    )
+                )
+                migrated_metas.append(self._metadata_for_chunk(
+                    title=str(metadata.get("title", "")),
+                    source_document_id=str(metadata.get("source_document_id") or "legacy"),
+                    source_chunk_id=str(metadata.get("source_chunk_id") or f"legacy#chunk_{index + 1:03d}"),
+                    content=str(content),
+                    chunk_index=int(metadata.get("chunk_index", index)),
+                    total_chunks=int(metadata.get("total_chunks", len(documents))),
+                    corpus_version=str(metadata.get("corpus_version") or DEFAULT_CORPUS_VERSION),
+                ))
+            self._collection.add(
+                ids=migrated_ids,
+                documents=[str(item) for item in documents],
+                metadatas=migrated_metas,
+            )
+            logger.info(
+                "已将旧知识库迁移到 %s，共 %s 个文档片段",
+                self.collection_name,
+                len(documents),
+            )
+            return len(documents)
+        except Exception as exc:
+            logger.info("未找到可迁移的旧知识库，跳过迁移: %s", exc)
+            return 0
+
+    @staticmethod
+    def _slugify(title: str) -> str:
+        """为缺失来源 ID 的文档生成稳定可读的来源标识。
+
+        Args:
+            title: 文档标题。
+
+        Returns:
+            由标题生成的安全来源标识。
+        """
+        value = re.sub(r"[^\w\u4e00-\u9fff]+", "_", str(title).strip())
+        return value.strip("_") or "doc"
+
+    @staticmethod
+    def _runtime_id(title: str, index: int, content: str) -> str:
+        """生成同一标题、序号和内容下稳定不变的 Chroma runtime ID。
+
+        Args:
+            title: 文档标题。
+            index: chunk 序号。
+            content: chunk 正文。
+
+        Returns:
+            稳定的 MD5 文档 ID。
+        """
+        return hashlib.md5(f"{title}_{index}_{content[:50]}".encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _metadata_for_chunk(
+        *,
+        title: str,
+        source_document_id: str,
+        source_chunk_id: str,
+        content: str,
+        chunk_index: int,
+        total_chunks: int,
+        corpus_version: str,
+    ) -> Dict[str, Any]:
+        """构造严格包含七项字段的 chunk metadata。
+
+        Args:
+            title: 原文标题。
+            source_document_id: 稳定的原文 ID。
+            source_chunk_id: 稳定的 chunk ID。
+            content: chunk 正文。
+            chunk_index: 从 0 开始的 chunk 序号。
+            total_chunks: 原文切片总数。
+            corpus_version: 语料版本。
+
+        Returns:
+            含七项必需字段的 metadata 字典。
+        """
+        return {
+            "title": title,
+            "source_document_id": source_document_id,
+            "source_chunk_id": source_chunk_id,
+            "content_hash": f"sha256:{hashlib.sha256(content.encode('utf-8')).hexdigest()}",
+            "chunk_index": chunk_index,
+            "total_chunks": total_chunks,
+            "corpus_version": corpus_version,
+        }
+
+    def _chunk_text(self, text: str, chunk_size: int = CHUNK_SIZE) -> List[str]:
+        """按换行和句子边界切片，并对超长单句执行硬切分。
+
+        Args:
+            text: 待切片的原始文档正文。
+            chunk_size: 单片最大字符数，默认锁定为 500。
+
+        Returns:
+            非空且每片不超过 ``chunk_size`` 的文本列表。
+        """
+        if chunk_size <= 0:
+            raise ValueError("chunk_size 必须为正数")
+        normalized = str(text or "").replace("\r\n", "\n").strip()
+        if not normalized:
+            return []
+        segments = [
+            segment.strip()
+            for segment in re.split(r"(?<=[。！？!?；;])|\n+", normalized)
+            if segment.strip()
+        ]
+        chunks: List[str] = []
+        current = ""
+        for segment in segments:
+            if len(segment) > chunk_size:
+                if current:
+                    chunks.append(current)
+                    current = ""
+                chunks.extend(
+                    segment[start : start + chunk_size]
+                    for start in range(0, len(segment), chunk_size)
+                )
+                continue
+            candidate = f"{current}\n{segment}" if current else segment
+            if len(candidate) > chunk_size:
+                chunks.append(current)
+                current = segment
+            else:
+                current = candidate
+        if current:
+            chunks.append(current)
+        return [chunk for chunk in chunks if chunk.strip()]
+
+    def add_documents(self, documents: Sequence[Dict[str, Any]]) -> int:
+        """切片并批量写入产品知识文档。
+
+        Args:
+            documents: 每项至少包含 ``title`` 和 ``content``，可选来源 ID 与语料版本。
+
+        Returns:
+            写入的 chunk 数量。
+        """
+        ids: List[str] = []
+        contents: List[str] = []
+        metadatas: List[Dict[str, Any]] = []
+        for document in documents:
+            title = str(document.get("title") or "")
+            content = str(document.get("content") or "")
+            chunks = self._chunk_text(content)
+            if not chunks:
+                continue
+            source_document_id = str(document.get("source_document_id") or self._slugify(title))
+            corpus_version = str(document.get("corpus_version") or DEFAULT_CORPUS_VERSION)
+            for index, chunk in enumerate(chunks):
+                ids.append(self._runtime_id(title, index, chunk))
+                contents.append(chunk)
+                metadatas.append(
+                    self._metadata_for_chunk(
+                        title=title,
+                        source_document_id=source_document_id,
+                        source_chunk_id=f"{source_document_id}#chunk_{index + 1:03d}",
+                        content=chunk,
+                        chunk_index=index,
+                        total_chunks=len(chunks),
+                        corpus_version=corpus_version,
+                    )
+                )
+        if ids:
+            self._collection.add(ids=ids, documents=contents, metadatas=metadatas)
+            logger.info("知识库写入 %s 个文档片段", len(ids))
+        return len(ids)
+
+    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """执行基础 Chroma 向量检索并返回稳定 chunk 身份。
+
+        Args:
+            query: 用户检索文本。
+            top_k: 最多返回的结果数。
+
+        Returns:
+            包含 ``title``、``content``、``score``、``id``、``runtime_id`` 和
+            ``source_chunk_id`` 的结果列表；score 是距离转换值而非概率。
+        """
+        bounded_top_k = max(0, int(top_k))
+        if bounded_top_k == 0:
+            return []
+        results = self._collection.query(
+            query_texts=[str(query or "")],
+            n_results=bounded_top_k,
+            include=["documents", "metadatas", "distances"],
+        )
+        documents = self._first_nested(results.get("documents"))
+        metadatas = self._first_nested(results.get("metadatas"))
+        distances = self._first_nested(results.get("distances"))
+        ids = self._first_nested(results.get("ids"))
+        rows: List[Dict[str, Any]] = []
+        for index, content in enumerate(documents):
+            metadata = metadatas[index] if index < len(metadatas) else {}
+            metadata = metadata if isinstance(metadata, dict) else {}
+            runtime_id = str(ids[index]) if index < len(ids) and ids[index] else ""
+            distance = distances[index] if index < len(distances) else 1.0
+            rows.append(
+                {
+                    "title": str(metadata.get("title", "")),
+                    "content": str(content),
+                    "score": round(1.0 - float(distance), 4),
+                    "id": runtime_id,
+                    "runtime_id": runtime_id,
+                    "source_chunk_id": str(metadata.get("source_chunk_id", "")),
+                    "source_document_id": str(metadata.get("source_document_id", "")),
+                    "content_hash": str(metadata.get("content_hash", "")),
+                    "chunk_index": metadata.get("chunk_index", 0),
+                    "total_chunks": metadata.get("total_chunks", 0),
+                    "corpus_version": str(metadata.get("corpus_version", "")),
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _first_nested(value: Any) -> List[Any]:
+        """统一 Chroma 返回的二维列表与测试替身的扁平列表。
+
+        Args:
+            value: Chroma 返回字段。
+
+        Returns:
+            第一组结果列表。
+        """
+        if isinstance(value, list) and value and isinstance(value[0], list):
+            return value[0]
+        return value if isinstance(value, list) else []
+
+    @property
+    def doc_count(self) -> int:
+        """返回当前 collection 中的 chunk 数量。"""
+        return int(self._collection.count())
