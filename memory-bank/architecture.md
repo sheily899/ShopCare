@@ -211,3 +211,14 @@ Rerank 只消费 Step 4.3 已完成去重的候选列表，不引入 Cross-Encod
 Step 5.3 只提供结构化上下文快照，不执行任何真实工单、订单、支付、退款或人工坐席写操作；Step 5.4 的 Agent profile 与编排逻辑尚未开始。
 
 验证：专项测试 `4 passed`；Step 5.1–5.3 回归 `18 passed`；全量 pytest `127 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+
+## Step 5.4：四大领域 Agent 实体与工具白名单隔离
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `agents/agent_orchestrator.py` | 新增 `AgentStats` 统计契约、`BaseAgent` Tool Use 执行基类和四类领域 Agent。BaseAgent 每次仅把自身 `tools` 转为 Anthropic schema，最多执行 3 轮 Tool Use，并在未知工具、LLM 异常和空响应时返回局部失败结果；统计 total/success/total_ms。General、Technical、Billing 分别绑定共享 `search_knowledge_base` 占位与各自领域工具；Escalation 保留 profile 声明但覆盖 `handle()`，直接生成会话内升级建议，不调用 LLM。 |
+| `tests/test_agent_orchestrator.py` | 验证四类 Profile 的 temperature/max_tokens、Technical/Billing 白名单互斥、Escalation 零 LLM 确定性、BaseAgent 异常统计和三轮 Tool Use 上限。 |
+
+共享 `search_knowledge_base` 当前仅是只读注入占位，返回不可用提示，不连接外部系统；真正的 KnowledgeBase handler、路由、Fan-out 和 ResponseComposer 留给 Step 6。Escalation 的 `escalate=True` 只表示升级建议，不等价于 API 的 `escalated=True`。
+
+验证：Step 5.4 专项 `5 passed`；Step 5 契约与工具回归 `30 passed`；全量 pytest `132 passed`；`compileall agents tests` 与 `git diff --check` 通过。

@@ -205,3 +205,20 @@
 - 异常：非法入参统一返回结构化安全错误，仍保留敏感数据禁止和无外部工单标志。
 - 验证：Step 5.3 专项 `4 passed`；Step 5.1–5.3 回归 `18 passed`；全量 pytest `127 passed`；`compileall agents tests` 与 `git diff --check` 通过。
 - 边界：未实现 Agent profile、编排器和真实人工系统接入；Step 5.4 未开始。
+
+## Step 5.4：四大领域 Agent 实体与工具白名单隔离
+
+- 状态：已完成，Checkpoint E-Agents 已闭环；等待人工确认后再进入 Step 6。
+- 修改：扩展 `agents/agent_orchestrator.py`，新增 `AgentStats`、`BaseAgent`、`GeneralAgent`、`TechnicalAgent`、`BillingAgent`、`EscalationAgent` 及四套固定 Profile；新增共享只读 `search_knowledge_base` 工具占位；创建 `tests/test_agent_orchestrator.py`。
+- Profile：General `0.3/900`，Technical `0.1/1200`，Billing `0.0/1100`，Escalation `0.0/500`（temperature/max_tokens）。
+- 执行：BaseAgent 仅向 Anthropic 暴露自身 `tools` 白名单，最多执行 3 轮 Tool Use；未知工具直接拒绝；异常边界返回 `success=False` 并记录 total、success、total_ms。
+- Escalation：重写 `handle()` 为零 Token 确定性摘要，只生成会话内升级建议，不创建工单、不设置真实接入状态。
+- 验证：Step 5.4 专项 `5 passed`；Step 5 契约与工具回归 `30 passed`；全量 pytest `132 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+- 边界：尚未实现路由、Fan-out、ResponseComposer、真实 KnowledgeBase handler 注入和 Step 6 编排逻辑。
+
+## Checkpoint E-Agents
+
+- [x] 四类 Agent Profile、temperature/max_tokens 与白名单隔离通过。
+- [x] BaseAgent 三轮 Tool Use 上限、异常隔离与统计通过。
+- [x] EscalationAgent 确定性摘要、不调用 LLM、不声明人工已接入通过。
+- [x] `progress.md` 与 `architecture.md` 已同步。
