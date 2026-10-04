@@ -336,8 +336,9 @@ Step 1 契约与环境
 
 - HTTP Chroma 优先，PersistentClient fallback。
 - collection=knowledge_base_zh，旧库 knowledge_base；使用 BAAI/bge-small-zh-v1.5、CPU、normalize_embeddings=true、HNSW l2。
-- 文档按句子/换行切片，每片最多 500 字符。
+- 文档优先按 Markdown `##`/`###` 标题层级切片，正文前注入 `[一级标题 > 二级标题 > 三级标题]` 面包屑；每片（含前缀）最多 500 字符，超长小节再按段落、句号和硬截断拆分。
 - 写入 title、source_document_id、source_chunk_id、content_hash、chunk_index、total_chunks、corpus_version。
+- 新建片段的 source_chunk_id 格式固定为 `{source_document_id}_chunk_{chunk_index}`。
 - 检索返回 title/content/score/id/稳定身份；score=round(1-distance,4)，无 score threshold。
 
 【前置依赖条件】

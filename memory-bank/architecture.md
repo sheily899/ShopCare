@@ -97,7 +97,7 @@ Checkpoint C-1 已完成；Step 3.3 不在 API 路由中提前接入后台任务
 
 | 文件 | 职责 |
 | --- | --- |
-| `mcp/knowledge_base.py` | 提供产品知识库的 Chroma HTTP 优先连接、本地 PersistentClient fallback、`knowledge_base_zh` collection 初始化、旧 `knowledge_base` 迁移、BGE CPU/归一化 embedding 配置、500 字符文档切片、七项 chunk metadata 和基础向量检索；不包含 ToolManager、缓存、熔断、Query Rewrite 或 Rerank。 |
+| `mcp/knowledge_base.py` | 提供产品知识库的 Chroma HTTP 优先连接、本地 PersistentClient fallback、`knowledge_base_zh` collection 初始化、旧 `knowledge_base` 迁移、BGE CPU/归一化 embedding 配置、Markdown Header-Aware 面包屑切片、500 字符硬上限、七项 chunk metadata 和基础向量检索；不包含 ToolManager、缓存、熔断、Query Rewrite 或 Rerank。 |
 | `tests/test_knowledge_base_embedding.py` | 使用 fake Chroma client 验证 HTTP 失败后的显式日志与 PersistentClient fallback、默认 collection、BGE CPU/normalize 配置、HNSW l2 和旧 collection 迁移。 |
 | `tests/test_knowledge_base_metadata.py` | 验证切片长度上限、七项 metadata 完整性、稳定 `source_chunk_id` 与 `score=round(1-distance,4)` 检索结果；低分结果不因 threshold 被过滤。 |
 
@@ -117,3 +117,13 @@ Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 尚未开始�
 | `tests/test_knowledge_base_ingestion.py` | 验证六篇源文档读取、500 字符切片上限、七项 metadata 和关键词召回 score。 |
 
 源文本是可审计的重建输入；老工程 `data/chroma` 的二进制索引不纳入 ShopCare，评测库保持独立 collection。
+
+### Step 4.1：Header-Aware 语义切片升级
+
+| 文件 | 职责 |
+| --- | --- |
+| `mcp/knowledge_base.py` | 按 Markdown `##`/`###` 标题优先拆分，在每片正文前注入标题面包屑；对超长小节按段落、句号和硬截断拆分，并以 `{source_document_id}_chunk_{chunk_index}` 生成稳定片段身份。 |
+| `scripts/init_knowledge_base.py` | 复用带标题上下文的切片器，校验七项 metadata、统计最大 chunk 长度，并输出文档数、chunk 数和耗时。 |
+| `tests/test_knowledge_base_chunking.py` | 验证六篇文档生成 16–22 个 chunk、面包屑、500 字符上限、metadata 完整性及 401 专属片段召回。 |
+
+本次升级实测六篇源文档生成 18 个 chunk，最大长度 244 字符；Step 4.2 的 ToolManager/CircuitBreaker 仍未开始。

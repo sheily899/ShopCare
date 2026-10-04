@@ -101,7 +101,7 @@ def test_document_chunks_are_bounded_and_metadata_has_exact_seven_fields(knowled
         "corpus_version",
     }
     assert all(set(metadata) == required for metadata in payload["metadatas"])
-    assert payload["metadatas"][0]["source_chunk_id"] == "refund-policy#chunk_001"
+    assert payload["metadatas"][0]["source_chunk_id"] == "refund-policy_chunk_0"
     assert payload["metadatas"][0]["total_chunks"] == written
 
 

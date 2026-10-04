@@ -89,7 +89,9 @@ def validate_chunks(kb: KnowledgeBase, documents: Sequence[Dict[str, Any]]) -> i
     """
     total = 0
     for document in documents:
-        chunks = kb._chunk_text(str(document["content"]))
+        chunks = kb._chunk_text(
+            str(document["content"]), title=str(document["title"])
+        )
         for index, chunk in enumerate(chunks):
             if len(chunk) > 500:
                 raise ValueError(
@@ -99,7 +101,7 @@ def validate_chunks(kb: KnowledgeBase, documents: Sequence[Dict[str, Any]]) -> i
                 title=str(document["title"]),
                 source_document_id=str(document["source_document_id"]),
                 source_chunk_id=(
-                    f"{document['source_document_id']}#chunk_{index + 1:03d}"
+                    f"{document['source_document_id']}_chunk_{index}"
                 ),
                 content=chunk,
                 chunk_index=index,
@@ -143,6 +145,13 @@ def run_ingestion(source_dir: Path = DEFAULT_SOURCE_DIR) -> Dict[str, Any]:
     documents = load_source_documents(source_dir)
     kb = build_knowledge_base()
     expected_chunks = validate_chunks(kb, documents)
+    max_chunk_length = max(
+        len(chunk)
+        for document in documents
+        for chunk in kb._chunk_text(
+            str(document["content"]), title=str(document["title"])
+        )
+    )
     written_chunks = kb.add_documents(documents)
     if written_chunks != expected_chunks:
         raise RuntimeError(
@@ -152,13 +161,15 @@ def run_ingestion(source_dir: Path = DEFAULT_SOURCE_DIR) -> Dict[str, Any]:
     stats = {
         "documents": len(documents),
         "chunks": written_chunks,
+        "max_chunk_length": max_chunk_length,
         "collection": kb.collection_name,
         "elapsed_ms": elapsed_ms,
     }
     logger.info(
-        "知识库入库完成: documents=%s chunks=%s collection=%s elapsed_ms=%s",
+        "知识库入库完成: documents=%s chunks=%s max_chunk_length=%s collection=%s elapsed_ms=%s",
         stats["documents"],
         stats["chunks"],
+        stats["max_chunk_length"],
         stats["collection"],
         stats["elapsed_ms"],
     )

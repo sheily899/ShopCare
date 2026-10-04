@@ -153,5 +153,5 @@ def test_empty_new_collection_migrates_legacy_documents(monkeypatch):
 
     assert len(new_collection.add_calls) == 1
     migrated_metadata = new_collection.add_calls[0]["metadatas"][0]
-    assert migrated_metadata["source_chunk_id"] == "legacy#chunk_001"
+    assert migrated_metadata["source_chunk_id"] == "legacy_chunk_0"
     assert migrated_metadata["content_hash"].startswith("sha256:")

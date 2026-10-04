@@ -238,15 +238,25 @@ class KnowledgeBase:
                         str(metadata.get("title", "legacy")), index, str(content)
                     )
                 )
-                migrated_metas.append(self._metadata_for_chunk(
-                    title=str(metadata.get("title", "")),
-                    source_document_id=str(metadata.get("source_document_id") or "legacy"),
-                    source_chunk_id=str(metadata.get("source_chunk_id") or f"legacy#chunk_{index + 1:03d}"),
-                    content=str(content),
-                    chunk_index=int(metadata.get("chunk_index", index)),
-                    total_chunks=int(metadata.get("total_chunks", len(documents))),
-                    corpus_version=str(metadata.get("corpus_version") or DEFAULT_CORPUS_VERSION),
-                ))
+                source_document_id = str(
+                    metadata.get("source_document_id") or "legacy"
+                )
+                migrated_metas.append(
+                    self._metadata_for_chunk(
+                        title=str(metadata.get("title", "")),
+                        source_document_id=source_document_id,
+                        source_chunk_id=str(
+                            metadata.get("source_chunk_id")
+                            or f"{source_document_id}_chunk_{index}"
+                        ),
+                        content=str(content),
+                        chunk_index=int(metadata.get("chunk_index", index)),
+                        total_chunks=int(metadata.get("total_chunks", len(documents))),
+                        corpus_version=str(
+                            metadata.get("corpus_version") or DEFAULT_CORPUS_VERSION
+                        ),
+                    )
+                )
             self._collection.add(
                 ids=migrated_ids,
                 documents=[str(item) for item in documents],
@@ -324,46 +334,110 @@ class KnowledgeBase:
             "corpus_version": corpus_version,
         }
 
-    def _chunk_text(self, text: str, chunk_size: int = CHUNK_SIZE) -> List[str]:
-        """按换行和句子边界切片，并对超长单句执行硬切分。
+    @staticmethod
+    def _split_long_body(text: str, max_length: int) -> List[str]:
+        """将超过可用长度的正文按段落、句号和硬上限拆开。
+
+        Args:
+            text: 待拆分的正文。
+            max_length: 正文可占用的最大字符数，已扣除面包屑前缀。
+
+        Returns:
+            不超过 ``max_length`` 的正文片段列表。
+        """
+        paragraphs = [
+            paragraph.strip()
+            for paragraph in re.split(r"\n{2,}", text)
+            if paragraph.strip()
+        ]
+        units: List[str] = []
+        for paragraph in paragraphs:
+            if len(paragraph) <= max_length:
+                units.append(paragraph)
+                continue
+            sentences = [
+                sentence.strip()
+                for sentence in re.split(r"(?<=[。！？!?；;])|\n+", paragraph)
+                if sentence.strip()
+            ]
+            for sentence in sentences:
+                units.extend(
+                    sentence[start : start + max_length]
+                    for start in range(0, len(sentence), max_length)
+                )
+
+        pieces: List[str] = []
+        current = ""
+        for unit in units:
+            candidate = f"{current}\n\n{unit}" if current else unit
+            if len(candidate) <= max_length:
+                current = candidate
+            else:
+                if current:
+                    pieces.append(current)
+                current = unit
+        if current:
+            pieces.append(current)
+        return pieces
+
+    def _chunk_text(
+        self,
+        text: str,
+        chunk_size: int = CHUNK_SIZE,
+        title: str = "",
+    ) -> List[str]:
+        """按 Markdown 标题层级切片，注入面包屑并执行 500 字符硬兜底。
 
         Args:
             text: 待切片的原始文档正文。
             chunk_size: 单片最大字符数，默认锁定为 500。
+            title: 文档一级标题，用于构造面包屑根节点。
 
         Returns:
-            非空且每片不超过 ``chunk_size`` 的文本列表。
+            带独立上下文前缀且不超过 ``chunk_size`` 的文本列表。
         """
         if chunk_size <= 0:
             raise ValueError("chunk_size 必须为正数")
         normalized = str(text or "").replace("\r\n", "\n").strip()
         if not normalized:
             return []
-        segments = [
-            segment.strip()
-            for segment in re.split(r"(?<=[。！？!?；;])|\n+", normalized)
-            if segment.strip()
-        ]
-        chunks: List[str] = []
-        current = ""
-        for segment in segments:
-            if len(segment) > chunk_size:
-                if current:
-                    chunks.append(current)
-                    current = ""
-                chunks.extend(
-                    segment[start : start + chunk_size]
-                    for start in range(0, len(segment), chunk_size)
-                )
-                continue
-            candidate = f"{current}\n{segment}" if current else segment
-            if len(candidate) > chunk_size:
-                chunks.append(current)
-                current = segment
+
+        sections: List[Tuple[List[str], str]] = []
+        heading_stack: List[Tuple[int, str]] = []
+        body_lines: List[str] = []
+
+        def flush_section() -> None:
+            """将当前标题路径下累积的正文保存为一个待拆分小节。"""
+            body = "\n".join(body_lines).strip()
+            if body:
+                sections.append(([item[1] for item in heading_stack], body))
+            body_lines.clear()
+
+        for line in normalized.splitlines():
+            match = re.match(r"^(#{2,6})\s+(.+?)\s*$", line)
+            if match:
+                flush_section()
+                level = len(match.group(1))
+                while heading_stack and heading_stack[-1][0] >= level:
+                    heading_stack.pop()
+                heading_stack.append((level, match.group(2).strip()))
             else:
-                current = candidate
-        if current:
-            chunks.append(current)
+                body_lines.append(line)
+        flush_section()
+
+        if not sections:
+            sections = [([], normalized)]
+
+        chunks: List[str] = []
+        for headings, body in sections:
+            breadcrumb = [str(title).strip()] if str(title).strip() else []
+            breadcrumb.extend(headings)
+            prefix = f"[{' > '.join(breadcrumb)}]\n" if breadcrumb else ""
+            available = chunk_size - len(prefix)
+            if available <= 0:
+                raise ValueError("文档标题面包屑已超过 chunk_size")
+            for piece in self._split_long_body(body, available):
+                chunks.append(f"{prefix}{piece}")
         return [chunk for chunk in chunks if chunk.strip()]
 
     def add_documents(self, documents: Sequence[Dict[str, Any]]) -> int:
@@ -381,7 +455,7 @@ class KnowledgeBase:
         for document in documents:
             title = str(document.get("title") or "")
             content = str(document.get("content") or "")
-            chunks = self._chunk_text(content)
+            chunks = self._chunk_text(content, title=title)
             if not chunks:
                 continue
             source_document_id = str(document.get("source_document_id") or self._slugify(title))
@@ -393,7 +467,7 @@ class KnowledgeBase:
                     self._metadata_for_chunk(
                         title=title,
                         source_document_id=source_document_id,
-                        source_chunk_id=f"{source_document_id}#chunk_{index + 1:03d}",
+                        source_chunk_id=f"{source_document_id}_chunk_{index}",
                         content=chunk,
                         chunk_index=index,
                         total_chunks=len(chunks),

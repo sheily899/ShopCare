@@ -362,7 +362,7 @@ Prompt 必须包含：主 Agent 类型、用户原文、每个成功 Agent 的�
 
 #### 3.3.1 基础配置
 
-collection=knowledge_base_zh；旧 collection=knowledge_base；embedding=BAAI/bge-small-zh-v1.5；CPU；normalize_embeddings=true；HNSW space=l2；切片最多 500 字符。每片保存 source_document_id、source_chunk_id、content_hash、chunk_index、total_chunks、title、corpus_version。
+collection=knowledge_base_zh；旧 collection=knowledge_base；embedding=BAAI/bge-small-zh-v1.5；CPU；normalize_embeddings=true；HNSW space=l2。文档采用 Markdown Header-Aware 切片：优先以 `##`/`###` 标题作为边界，为正文注入 `[一级标题 > 二级标题 > 三级标题]` 面包屑；每片（含前缀）最多 500 字符，超长小节按段落、句号和硬截断继续拆分。每片保存 source_document_id、source_chunk_id、content_hash、chunk_index、total_chunks、title、corpus_version，其中 source_chunk_id 格式为 `{source_document_id}_chunk_{chunk_index}`。
 
 #### 3.3.2 业务门控
 

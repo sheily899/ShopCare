@@ -113,7 +113,7 @@ def test_ingested_chunks_have_all_seven_metadata_fields(monkeypatch):
         assert set(metadata) == REQUIRED_METADATA_FIELDS
         assert len(row["document"]) <= 500
         assert metadata["source_chunk_id"].startswith(
-            f"{metadata['source_document_id']}#chunk_"
+            f"{metadata['source_document_id']}_chunk_"
         )
         assert metadata["content_hash"].startswith("sha256:")
 
@@ -128,5 +128,5 @@ def test_keyword_query_recalls_matching_document_with_distance_score(monkeypatch
 
     assert rows
     assert rows[0]["source_document_id"] == "refund_policy"
-    assert rows[0]["source_chunk_id"].startswith("refund_policy#chunk_")
+    assert rows[0]["source_chunk_id"].startswith("refund_policy_chunk_")
     assert rows[0]["score"] == round(1 - 0.2, 4)

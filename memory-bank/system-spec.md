@@ -128,7 +128,7 @@ AgentStats(total=0, success=0, total_ms=0.0, monitor_penalty=0.0) 的评分公�
 
 - 默认 collection 是 knowledge_base_zh；旧 collection 是 knowledge_base。空新库时尝试迁移旧库，否则装载 6 篇默认文档。
 - embedding model 是 BAAI/bge-small-zh-v1.5，SentenceTransformerEmbeddingFunction(device=cpu, normalize_embeddings=True)，HNSW space=l2。
-- 切片上限 500 字符；元数据含 title、chunk_index、total_chunks、source_document_id、source_chunk_id、content_hash、corpus_version。
+- 当前产品知识库采用 Markdown Header-Aware 切片：优先按 `##`/`###` 标题边界拆分，并为每片注入 `[一级标题 > 二级标题 > 三级标题]` 面包屑；单片（含前缀）硬上限 500 字符，超长小节再按段落、句号和硬截断拆分。元数据含 title、chunk_index、total_chunks、source_document_id、source_chunk_id、content_hash、corpus_version；新建片段的 source_chunk_id 格式为 `{source_document_id}_chunk_{chunk_index}`。
 - 检索 score=round(1-distance,4)，未定义为概率，也没有最低 score 阈值。
 
 ### 4.2 门控、rewrite、召回与 rerank
