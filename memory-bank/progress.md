@@ -297,3 +297,19 @@
 - [x] `/chat` 完成上下文读取、意图识别、编排、记忆回写和画像后台任务隔离。
 - [x] `/search`、知识入库/上传、知识库统计、Trace 查询、Skill 列表/热加载路由通过离线测试。
 - [x] Trace 明确为最多 200 条内存运行期数据，服务重启后丢失；更新 `progress.md` 与 `architecture.md`。
+
+## Step 7.4：Vue 3 + Vite 前端双栏工作台
+
+- 状态：已完成，Step 7 前后端主链路与管理界面已闭环；等待人工确认后再进入 Step 8。
+- 修改：新增 `frontend/` Vue 3 + Vite 工程，包含 `App.vue`、`ChatView.vue`、`AdminView.vue`、`src/api/index.js`、入口文件与严格三色/三字号样式；`.gitignore` 忽略 `frontend/node_modules/` 与 `frontend/dist/`。
+- 会话视图：左侧 240px 历史会话栏支持新建、切换和 `shopcare_sessions` localStorage 持久化；右侧支持引导短语、回车发送、ChatResponse 元数据、转人工动态提示与安全 Markdown 链接渲染。
+- 管理视图：展示 `/health` 知识库概况；接入 `/search`、`/knowledge/upload`、`/skills`、`/skills/reload`、`/trace/tools`；上传沿用后端 10MB 与 txt/md/json 边界；断路器状态未由当前后端暴露，界面明确显示“未暴露”。
+- 视觉边界：画布 CREMA、强调 TOMATO、提示 PEAR；辅助文字使用深炭褐/白/灰；字号只使用 12/14/18px；无 Emoji、机器人头像、状态圆点、渐变或阴影。
+- 验证：`npm install` 成功安装 35 个依赖；`npm run build` 通过；`npm run dev -- --host localhost` 在 `http://localhost:5173/` 正常启动；`git diff --check` 通过。
+
+## Checkpoint 主链路
+
+- [x] FastAPI `/health`、`/chat` 与支持性管理 API 已有前端调用入口。
+- [x] 会话历史可本地持久化，新建/切换会话与 `conv_id` 对齐。
+- [x] 管理界面接入知识检索、文档上传、技能热加载和内存 Trace 查询，并保留后端安全边界说明。
+- [x] Step 7.4 前端构建与开发服务器启动验证通过；Step 8 未开始。

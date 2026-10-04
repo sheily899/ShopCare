@@ -332,3 +332,37 @@ SkillManager.skills_dir/*.md
 - 管理类 API 与 CORS 当前为开发期开放状态，代码文档已明确生产前需要鉴权网关；所有路由都不连接外部订单、支付、退款、工单或人工系统。
 
 验证：支持性路由专项 `4 passed`；指定 API 回归 `20 passed`；全量 pytest `157 passed`；`compileall api tests` 与 `git diff --check` 通过。
+
+## Step 7.4：Vue 3 + Vite 前端工作台
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `frontend/package.json` / `frontend/vite.config.js` | 锁定 Vue `^3.5.25`、Vite `^7.2.7` 与 Vue 插件 `^6.0.2`，提供 dev/build/preview 脚本；开发服务默认 localhost:5173。 |
+| `frontend/src/App.vue` | 提供无路由依赖的“会话/管理”文字导航，只切换视图，不复制后端业务逻辑。 |
+| `frontend/src/views/ChatView.vue` | 实现 240px 历史会话栏、localStorage 会话持久化、ChatRequest 发送、消息元数据、转人工文案和安全 HTML 转义 Markdown 链接。 |
+| `frontend/src/views/AdminView.vue` | 实现知识库概况、检索探针、10MB 文件上传、技能热加载和内存 Trace 表格；未暴露的断路器状态标为“未暴露”。 |
+| `frontend/src/api/index.js` | 统一封装对 `http://localhost:8000` 的 fetch 请求：`/chat`、`/health`、`/search`、`/knowledge/upload`、`/skills`、`/skills/reload`、`/trace/tools`。 |
+| `frontend/src/styles.css` | 固化 CREMA/TOMATO/PEAR 三色和 12/14/18px 三字号，采用纯文字与细边框布局，不引入 Emoji、图标库、渐变、状态点或重阴影。 |
+
+### 前端数据流
+
+```text
+ChatView localStorage(shopcare_sessions)
+        -> POST /chat {message, user_id, conv_id}
+        -> ChatResponse
+        -> assistant message + metadata
+        -> localStorage/session switch
+
+AdminView
+  -> GET /health          -> collection/model/doc_count
+  -> POST /search         -> result table
+  -> POST /knowledge/upload -> chunk ingestion notice
+  -> POST /skills/reload  -> skill snapshot
+  -> GET /trace/tools     -> memory trace table
+```
+
+- 前端只负责展示与请求编排，不执行订单查询、退款、支付、改地址、工单创建或真实人工接入。
+- Markdown 在浏览器端先做 HTML 字符转义，仅允许 `http`、`https`、`mailto` 链接；后端仍是事实安全边界。
+- 管理 API 的开放鉴权缺口、Trace 重启丢失和断路器未暴露状态均用文字显示，不包装成已实现能力。
+
+验证：`npm install` 成功安装 35 个依赖；`npm run build` 通过；`npm run dev -- --host localhost` 正常启动；`git diff --check` 通过。
