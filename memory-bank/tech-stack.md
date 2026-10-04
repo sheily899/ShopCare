@@ -184,6 +184,9 @@ HTTP 优先、PersistentClient fallback 的顺序必须保留；fallback 发生�
     normalize_embeddings=true
     hnsw:space=l2
 
+本机离线运行可将 `CUSTOMEROPS_EMBEDDING_MODEL` 覆盖为相对目录
+`models/BAAI/bge-small-zh-v1.5`（该目录为已验证可加载的本机复用模型，二进制不纳入 Git）；默认值仍保持远程模型标识，避免把个人机器路径写入通用配置。
+
 长期记忆：
 
     episodic

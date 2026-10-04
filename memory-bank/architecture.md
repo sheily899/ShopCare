@@ -137,3 +137,13 @@ Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 尚未开始�
 | `tests/test_knowledge_base_embedding.py` | 模拟真实 `HttpClient` 对 Settings 的原地污染，并断言 fallback 使用 SegmentAPI 配置，防止 404 后再次走 HTTP。 |
 
 验证：全量 pytest `88 passed`；真实 Chroma 0.5.23 在 `localhost:8000` 返回 404 时可成功创建本地 `PersistentClient`。
+
+### Step 4.1：本机 BGE 模型复用
+
+运行时发现并复用了 Lenovo RAG 模块中的本地模型目录，复制到 `models/BAAI/bge-small-zh-v1.5`。当前目录包含完整 tokenizer、Transformer 配置、Pooling 配置和 `model.safetensors`/`pytorch_model.bin`，使用 ShopCare `.venv` 在 CPU 上加载成功，输出维度为 512；由于源目录的内部 `_name_or_path` 记录为 `BAAI_bge-small-zh`，文档将其标记为已验证可运行的本机复用候选，而非凭文件名声称远程仓库版本绝对一致。
+
+正式运行时通过环境变量指定本地目录：
+
+    $env:CUSTOMEROPS_EMBEDDING_MODEL="D:\\EchoMind\\ShopCare\\models\\BAAI\\bge-small-zh-v1.5"
+
+该模型目录和 Hugging Face 运行缓存已加入 `.gitignore`，不进入版本库；产品 collection 仍固定为 `knowledge_base_zh`，未改变模型职责或 Step 4.2 范围。
