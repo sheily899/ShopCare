@@ -328,4 +328,13 @@
 - `backend/`：集中 Python 后端源代码、脚本、测试、六篇知识源、依赖文件、Chroma 运行数据和本地 BGE 模型目录。
 - `frontend/`：继续作为独立 Vue 3 + Vite 工程；根目录 `pytest.ini` 将后端测试路径映射到 `backend/tests/`。
 - 根目录保留：`AGENTS.md`、`.gitignore`、`pytest.ini`、`memory-bank/`、Git 元数据；`.venv`、缓存、模型和运行时数据不提交。
+
+## Docker Compose 一键部署
+
+- 新增：`backend/Dockerfile` 使用 `python:3.12-slim`，先安装 `torch==2.4.1+cpu`，再安装后端锁定依赖；以 UID 1000 非 root 用户运行，暴露 8000，并通过 `/health` 做容器健康检查。
+- 新增：`frontend/Dockerfile` 采用 Node 20 Alpine 构建 Vue 静态产物，再由 Nginx Alpine 提供服务；`frontend/nginx.conf` 支持 Vue Router 回退和 `/api/` 到 `backend:8000` 的反向代理。
+- 新增：根目录 `docker-compose.yml` 编排 Redis 7、ChromaDB 0.5.23、FastAPI 后端和 Nginx 前端，统一使用 `shopcare-net`，并持久化 Redis AOF 与 Chroma 数据卷。
+- 启动顺序：Redis 与 Chroma 健康后启动后端，后端 `/health` 健康后启动前端；容器内通过服务名互联，不依赖宿主机 localhost。
+- 边界：Compose 仅透传根目录 `.env` 的 Anthropic 配置，不提交密钥；BGE 模型默认在后端首次启动时按模型标识下载，个人本地模型目录不会打入镜像。
+- 验证：`docker compose config --quiet` 通过；前端生产镜像与后端生产镜像均构建成功；Docker Desktop 首次构建曾受本机 buildx 权限拦截，授权后已完成验证。
 - 运行入口：`python -m uvicorn api.main:app --app-dir backend --reload`；知识库脚本：`python backend/scripts/init_knowledge_base.py`。

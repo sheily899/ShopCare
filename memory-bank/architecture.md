@@ -381,3 +381,27 @@ AdminView
 - 管理 API 的开放鉴权缺口与 Trace 重启丢失仍由后端事实边界负责；前端只展示接口返回的运行数据，断路器统计卡属于当前开发期工作台展示项，不新增后端能力。
 
 验证：`npm install` 成功安装 35 个依赖；`npm run build` 通过；`npm run dev -- --host localhost` 正常启动；`git diff --check` 通过。
+
+## Docker Compose 一键部署
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `backend/Dockerfile` | 基于 `python:3.12-slim` 构建后端，按 CPU 索引安装 `torch==2.4.1+cpu` 和锁定 requirements，以 UID 1000 非 root 用户运行，并提供 `/health` 健康检查。 |
+| `frontend/Dockerfile` | 使用 Node 20 Alpine 构建 Vue 静态产物，再使用 Nginx Alpine 提供生产静态服务；通过 `VITE_API_BASE_URL=/api` 固定容器内反代入口。 |
+| `frontend/nginx.conf` | 提供 Vue Router history fallback，将 `/api/*` 和兼容的后端路由代理到 `backend:8000`，并限制上传体积为 10MB。 |
+| `docker-compose.yml` | 编排 `redis:7-alpine`、`chromadb/chroma:0.5.23`、FastAPI backend 与 Nginx frontend；使用 `shopcare-net` 服务发现及 Redis/Chroma 命名卷。 |
+| `backend/.dockerignore` / `frontend/.dockerignore` | 排除本地虚拟环境、模型、运行数据、测试缓存、`node_modules` 和构建产物，避免污染生产构建上下文。 |
+
+容器数据流：
+
+```text
+Browser :80
+   -> frontend/nginx /api/*
+   -> backend:8000
+      -> redis:6379       (工作记忆与画像上下文)
+      -> chromadb:8000    (knowledge_base_zh / episodic / user_profile)
+```
+
+Compose 使用健康依赖确保 Redis、Chroma 就绪后再启动后端，后端 `/health` 就绪后再启动前端；宿主机端口仍映射为 Redis `6379`、Chroma `8001`、API `8000`、前端 `80`。Anthropic 密钥只从根目录 `.env` 透传，不写入镜像或版本库。
+
+验证：`docker compose config --quiet` 通过；前端与后端生产镜像均已实际构建成功。

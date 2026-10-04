@@ -1,0 +1,90 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - shopcare-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - shopcare-net
+
+  chromadb:
+    image: chromadb/chroma:0.5.23
+    environment:
+      IS_PERSISTENT: "TRUE"
+      ANONYMIZED_TELEMETRY: "FALSE"
+    ports:
+      - "8001:8000"
+    volumes:
+      - shopcare-chroma-data:/chroma/chroma
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v2/heartbeat')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - shopcare-net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-3-5-sonnet-20241022}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      REDIS_URL: redis://redis:6379/0
+      CHROMA_HOST: chromadb
+      CHROMA_PORT: "8000"
+      CHROMA_PERSIST_DIRECTORY: /app/.data/chroma
+      CUSTOMEROPS_KB_COLLECTION: knowledge_base_zh
+      CUSTOMEROPS_EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
+      CUSTOMEROPS_SKILLS_DIR: /app/skills
+      CUSTOMEROPS_SKILLS_MAX_PROMPT_CHARS: "5000"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROMETHEUS_PORT: ${PROMETHEUS_PORT:-0}
+      MONITOR_INTERVAL: ${MONITOR_INTERVAL:-10}
+      CUSTOMEROPS_TOOL_TRACE_MAX: ${CUSTOMEROPS_TOOL_TRACE_MAX:-200}
+    depends_on:
+      redis:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8000/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 60s
+      retries: 5
+    networks:
+      - shopcare-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    networks:
+      - shopcare-net
+
+networks:
+  shopcare-net:
+    driver: bridge
+
+volumes:
+  shopcare-redis-data:
+  shopcare-chroma-data:
