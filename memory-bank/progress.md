@@ -303,7 +303,7 @@
 - 状态：已完成，Step 7 前后端主链路与管理界面已闭环；等待人工确认后再进入 Step 8。
 - 修改：保留 `frontend/` Vue 3 + Vite 工程与后端 API 边界，重构 `App.vue`、`ChatView.vue`、`AdminView.vue` 及全局样式，建立浅灰画布、白色表面、深森林绿主色和环境光阴影令牌。
 - 会话视图：顶部导航提供会话/管理切换、历史会话数量、新对话；历史记录改为 320px 抽屉式滑出面板，继续使用 `shopcare_sessions` localStorage 持久化；会话主体采用 960px 悬浮白色工作卡片，保留 ChatResponse 元数据、转人工提示与安全 Markdown 链接渲染。
-- 管理视图：知识库、切片数量、嵌入模型与断路器状态拆分为四个统计浮岛；知识维护、检索探针和 Trace 表格均采用独立卡片与留白布局，继续接入既有 `/health`、`/search`、`/knowledge/upload`、`/skills/reload`、`/trace/tools`。
+- 管理视图：知识库、切片数量、嵌入模型与断路器状态拆分为四个统计浮岛；左侧仅保留文档拖拽上传与状态反馈，右侧保留检索探针，底部保留 Trace 表格，继续接入既有 `/health`、`/search`、`/knowledge/upload`、`/trace/tools`；技能列表与技能重载不再由前端管理台展示或调用。
 - 视觉边界：画布 `#F8FAFC`、表面 `#FFFFFF`、嵌套灰槽 `#F1F5F9`、主色 `#2D6A4F`、边框 `#E2E8F0`；字号限制为标题 18/20px、正文 14px、元数据 12px；无 Emoji、机器人头像、状态点和发光特效。
 - 验证：`npm install` 成功安装 35 个依赖；`npm run build` 通过；`npm run dev -- --host localhost` 在 `http://localhost:5173/` 正常启动；`git diff --check` 通过。
 

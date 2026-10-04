@@ -1,9 +1,8 @@
 <script setup>
 import { onMounted, ref } from 'vue'
-import { getHealth, getSkills, getTraces, reloadSkills, searchKnowledge, uploadKnowledge } from '../api/index.js'
+import { getHealth, getTraces, searchKnowledge, uploadKnowledge } from '../api/index.js'
 
 const health = ref({ collection_name: '—', doc_count: '—', embedding_model: '—' })
-const skills = ref([])
 const traces = ref([])
 const searchQuery = ref('')
 const results = ref([])
@@ -26,9 +25,8 @@ function shortEmbeddingModel(value) {
 
 async function loadOverview() {
   try {
-    const [healthResponse, skillResponse, traceResponse] = await Promise.all([getHealth(), getSkills(), getTraces()])
+    const [healthResponse, traceResponse] = await Promise.all([getHealth(), getTraces()])
     health.value = healthResponse.knowledge_base || health.value
-    skills.value = skillResponse.skills || []
     traces.value = traceResponse.traces || []
   } catch (error) {
     errorMessage.value = error.message || '管理数据读取失败。'
@@ -71,20 +69,6 @@ async function handleFile(event) {
   }
 }
 
-async function handleReload() {
-  busy.value = true
-  errorMessage.value = ''
-  try {
-    const response = await reloadSkills()
-    skills.value = response.skills || []
-    notice.value = `已加载 ${skills.value.length} 项业务技能。`
-  } catch (error) {
-    errorMessage.value = error.message || '技能重载失败。'
-  } finally {
-    busy.value = false
-  }
-}
-
 function dropFile(event) {
   event.preventDefault()
   const file = event.dataTransfer.files?.[0]
@@ -116,17 +100,11 @@ onMounted(loadOverview)
 
     <div class="admin-grid">
       <section class="admin-card">
-        <h2>知识维护与技能</h2>
+        <h2>文档上传</h2>
         <div class="upload-box" @dragover.prevent @drop="dropFile">
           <p>拖拽 txt, md, json 文件至此 (上限 10MB)</p>
           <button class="outline-button" type="button" @click="chooseFile">选择文件</button>
           <input ref="fileInput" class="sr-only" type="file" accept=".txt,.md,.json" @change="handleFile" />
-        </div>
-        <button class="outline-button wide-button" type="button" :disabled="busy" @click="handleReload">重载业务技能</button>
-        <div class="skill-list">
-          <span class="field-label">当前技能</span>
-          <span v-if="!skills.length" class="muted-copy">暂无本地技能</span>
-          <span v-for="skill in skills" :key="skill" class="skill-name">{{ skill }}</span>
         </div>
       </section>
 

@@ -115,10 +115,6 @@ button:disabled { cursor: not-allowed; opacity: 0.55; }
 .admin-card h2 { margin: 0 0 18px; font-size: 18px; }
 .upload-box { padding: 34px 16px; text-align: center; background: var(--bg-subtle); border: 1px dashed var(--color-border); border-radius: 8px; }
 .upload-box p { margin: 0 0 16px; color: var(--color-muted); font-size: 14px; }
-.wide-button { width: 100%; margin-top: 14px; }
-.skill-list { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.skill-list .field-label { width: 100%; margin: 20px 0 0; color: var(--color-muted); font-size: 12px; }
-.skill-name { padding: 5px 8px; color: var(--color-primary); background: var(--bg-subtle); border-radius: 4px; font-size: 12px; }
 .search-form { display: flex; gap: 8px; margin-bottom: 18px; }
 .search-form input { min-width: 0; flex: 1; padding: 10px 12px; color: var(--color-text); background: var(--bg-surface); border: 1px solid var(--color-border); border-radius: 6px; outline: 0; }
 .search-form input:focus { border-color: var(--color-primary); box-shadow: 0 0 0 3px rgba(45, 106, 79, 0.08); }
