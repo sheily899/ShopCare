@@ -233,3 +233,15 @@ Step 5.3 只提供结构化上下文快照，不执行任何真实工单、订�
 评分值只用于相对路由，不代表概率；澄清分支用 `primary_agent=None` 表示无执行目标。Step 6.1 不创建并发任务，不实现 Fan-out、ResponseComposer 或真实业务接口。
 
 验证：专项 `5 passed`；全量 pytest `137 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+
+## Step 6.2：并发 Fan-out、强制知识检索与 Trace 收集
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `agents/agent_orchestrator.py` | 为 `BaseAgent` 增加可选 `tools_override` 和上下文注入；新增单 Agent 知识前置检索、同步 KnowledgeBase 线程隔离、`_fan_out` 异常隔离和 `AgentOrchestrator.run_parallel/run` 入口。业务请求每个实际 Agent 只执行一次 `search_knowledge_base(query, top_k=5)`，随后从 Anthropic 工具白名单中移除 search；工具调用统一记录 `tool_name`、`input`、`latency_ms`、`status`，检索 Trace 记录召回切片摘要。 |
+| `tests/test_knowledge_required_retrieval.py` | 验证每个 Agent 单次知识检索、固定 `top_k=5`、Prompt 上下文注入和 search 工具剔除。 |
+| `tests/test_retrieval_stage_trace.py` | 验证 `asyncio.gather(return_exceptions=True)` 的局部异常隔离、工具去重聚合和 `retrieval_stage` Trace 元数据。 |
+
+本阶段仅完成 Fan-out 与证据/Trace 汇聚，不实现 ResponseComposer 的语义合并；多路成功时暂保留主 Agent 文本，专业分支完整结果通过结构化 Trace 返回。知识检索失败只标记 failed 状态并注入谨慎提示，不伪造召回内容。
+
+验证：Step 6.2 专项 `4 passed`；相关 Agent/路由回归 `14 passed`；全量 pytest `141 passed`；`compileall agents tests` 与 `git diff --check` 通过。

@@ -232,3 +232,14 @@
 - 辅助与降级：supporting 只从识别器给出的 `secondary_intents` 映射，过滤同域、重复和 Escalation；Technical/Billing 失败自动调用 General，General/Escalation 失败只返回友好失败提示。
 - 验证：Step 6.1 专项 `5 passed`；全量 pytest `137 passed`；`compileall agents tests` 与 `git diff --check` 通过。
 - 边界：尚未实现 Fan-out、ResponseComposer、强制知识检索和 Step 6.2。
+
+## Step 6.2：并发 Fan-out、强制知识检索与 Trace 收集
+
+- 状态：已完成，等待人工确认后再进入 Step 6.3。
+- 修改：扩展 `agents/agent_orchestrator.py`，新增轻量 `AgentOrchestrator`、`_fan_out`、单 Agent 知识前置检索、Prompt 上下文注入、search 工具动态剔除和 Trace 聚合；新增 `tests/test_knowledge_required_retrieval.py`、`tests/test_retrieval_stage_trace.py`。
+- 强制检索：`knowledge_required=True` 时，每个实际 Agent 只调用一次 `search_knowledge_base`，固定 `top_k=5`；支持 `scoped_retrieval_queries` 按领域传递查询；同步 `KnowledgeBase.search` 使用 `asyncio.to_thread`。
+- 工具隔离：检索完成后通过 `tools_override` 从该 Agent 的 Anthropic 工具声明与工具映射中移除 `search_knowledge_base`，避免模型重复召回；检索失败仍注入不可用说明，不伪造知识结果。
+- Fan-out：使用 `asyncio.gather(..., return_exceptions=True)` 并发执行主/辅助 Agent；辅助异常只记录日志并跳过，成功主结果继续返回；本阶段不实现 ResponseComposer。
+- Trace：聚合去重后的 `tools_used`，保留 `tool_name`、`input`、`latency_ms`、`status`、`retrieval_stage`、召回切片和摘要预览；在 `intent_diagnostics["retrieval_stage"]` 与内存 Trace 队列中保存。
+- 验证：Step 6.2 专项 `4 passed`；相关 Agent/路由回归 `14 passed`；全量 pytest `141 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+- 边界：未实现 ResponseComposer 语义合并、最终 Fan-in 冲突消解和 Step 6.3。
