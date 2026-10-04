@@ -139,7 +139,7 @@ onMounted(loadOverview)
       <div class="section-heading"><h2>调用轨迹</h2><span class="muted-copy">最近 200 条</span></div>
       <div class="result-table-wrap">
         <table class="data-table">
-          <thead><tr><th>请求ID</th><th>意图</th><th>处理节点</th><th>耗时</th></tr></thead>
+          <thead><tr><th>请求ID</th><th>意图</th><th>处理节点</th><th>编排耗时</th></tr></thead>
           <tbody>
             <tr v-for="trace in traces" :key="trace.request_id"><td>{{ trace.request_id }}</td><td>{{ trace.intent || '—' }}</td><td>{{ (trace.executed_agents || []).join('、') || '—' }}</td><td>{{ formatLatency(trace.latency_ms) }}</td></tr>
             <tr v-if="!traces.length"><td colspan="4" class="empty-cell">暂无调用轨迹</td></tr>

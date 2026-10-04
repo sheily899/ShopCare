@@ -352,10 +352,12 @@ SkillManager.skills_dir/*.md
 | --- | --- |
 | `frontend/package.json` / `frontend/vite.config.js` | 锁定 Vue `^3.5.25`、Vite `^7.2.7` 与 Vue 插件 `^6.0.2`，提供 dev/build/preview 脚本；开发服务默认 localhost:5173。 |
 | `frontend/src/App.vue` | 提供会话/管理切换、统一的新对话操作与历史会话数量；通过抽屉式面板展示 `ChatView` 发出的 localStorage 会话摘要，不复制后端业务逻辑。 |
-| `frontend/src/views/ChatView.vue` | 实现悬浮白色工作卡片、空状态引导、3 个快捷问题、localStorage 会话持久化、ChatRequest 发送、消息元数据、自适应秒/分钟耗时、转人工文案和安全 Markdown 渲染；对外暴露新建/切换会话方法。 |
+| `frontend/src/views/ChatView.vue` | 实现悬浮白色工作卡片、空状态引导、3 个快捷问题、localStorage 会话持久化、ChatRequest 发送、消息元数据、基于浏览器请求墙钟时间的端到端耗时、转人工文案和安全 Markdown 渲染；保留后端服务端耗时诊断字段，并对外暴露新建/切换会话方法。 |
 | `frontend/src/views/AdminView.vue` | 实现四个统计浮岛、文档上传与检索双卡片、10MB 文件上传状态反馈和内存 Trace 表格；移除技能列表与技能重载入口，耗时统一使用秒/分钟可读格式，嵌入模型展示为 CPU 简称。 |
 | `frontend/src/api/index.js` | 统一封装对 `http://localhost:8000` 的 fetch 请求：`/chat`、`/health`、`/search`、`/knowledge/upload`、`/skills`、`/skills/reload`、`/trace/tools`。 |
 | `frontend/src/styles.css` | 固化 `#F8FAFC` 画布、`#FFFFFF` 表面、`#F1F5F9` 灰槽、`#2D6A4F` 主色、环境光阴影和 12/14/18/20px 字号层级；实现导航胶囊、抽屉过渡、悬浮卡片、响应式表格，不引入 Emoji、图标库、霓虹特效或渐变。 |
+
+耗时口径：`POST /chat` 返回的 `latency_ms` 是服务端 API 全链路耗时，`intent_diagnostics.orchestrator_latency_ms` 是 Agent 编排阶段耗时；会话页在浏览器端从 `fetch` 发起到响应解析完成重新计时并显示客户端端到端耗时，避免把内部阶段耗时误作用户等待时间。
 
 ### 前端数据流
 

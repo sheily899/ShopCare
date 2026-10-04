@@ -1019,6 +1019,14 @@ async def chat(chat_request: ChatRequest) -> ChatResponse:
     )
     _schedule_profile_update(memory_manager, chat_request.user_id, conv_id)
 
+    # 让刚创建的后台任务获得一个事件循环调度机会；只让协程开始执行，不等待画像写入完成，
+    # 这样测试与真实请求都能观察到任务已入队，同时不把画像更新重新变成同步链路。
+    await asyncio.sleep(0)
+
+    # API 边界采用端到端计时，覆盖上下文读取、意图识别、编排与同步记忆写回，
+    # 避免把仅包含 Agent 编排阶段的 latency_ms 误报成用户实际等待时间。
+    end_to_end_latency_ms = max(0.0, (time.perf_counter() - started) * 1000)
+    orchestrator_latency_ms = max(0.0, float(getattr(result, "latency_ms", 0.0) or 0.0))
     result_intent = getattr(result, "intent", intent)
     result_secondary = list(getattr(result, "secondary_intents", []) or [])
     if not result_secondary:
@@ -1032,6 +1040,7 @@ async def chat(chat_request: ChatRequest) -> ChatResponse:
     response_diagnostics.update(dict(getattr(result, "intent_diagnostics", {}) or {}))
     response_diagnostics["memory_context_loaded"] = bool(context.to_prompt_text())
     response_diagnostics["knowledge_required"] = knowledge_required
+    response_diagnostics["orchestrator_latency_ms"] = round(orchestrator_latency_ms, 3)
     knowledge_used = knowledge_required or any(
         isinstance(trace, Mapping) and trace.get("retrieval_stage")
         for trace in tool_traces
@@ -1057,13 +1066,7 @@ async def chat(chat_request: ChatRequest) -> ChatResponse:
         agent_recommended_handoff=bool(
             getattr(result, "agent_recommended_handoff", False)
         ),
-        latency_ms=max(
-            0.0,
-            float(
-                getattr(result, "latency_ms", 0.0)
-                or ((time.perf_counter() - started) * 1000)
-            ),
-        ),
+        latency_ms=round(end_to_end_latency_ms, 3),
         knowledge_used=knowledge_used,
         entities=dict(getattr(intent_result, "entities", {}) or {}),
         intent_confidence=float(getattr(intent_result, "confidence", 0.0) or 0.0),

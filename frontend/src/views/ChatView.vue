@@ -201,8 +201,18 @@ async function submit(message = input.value) {
   errorMessage.value = ''
   sending.value = true
   try {
+    // 以浏览器请求生命周期计时，覆盖网络传输、后端处理与响应渲染前等待，
+    // 这样展示给用户的耗时才对应真实体感，而不是只反映后端某个内部阶段。
+    const clientStartedAt = performance.now()
     const result = await sendChat({ message: text, userId: USER_ID, convId: session.id })
-    const assistantMessage = { role: 'assistant', content: result.response || '当前没有可展示的回复。', createdAt: new Date().toISOString(), metadata: result }
+    const clientLatencyMs = Math.max(0, performance.now() - clientStartedAt)
+    const assistantMessage = {
+      role: 'assistant',
+      content: result.response || '当前没有可展示的回复。',
+      createdAt: new Date().toISOString(),
+      // UI 使用 client_latency_ms；server_latency_ms 保留后端 API 计时，便于定位网络与服务端耗时差异。
+      metadata: { ...result, latency_ms: clientLatencyMs, client_latency_ms: clientLatencyMs, server_latency_ms: result.latency_ms },
+    }
     updateSession({ ...session, id: result.conv_id || session.id, messages: [...session.messages, assistantMessage] })
     if (result.conv_id && result.conv_id !== activeId.value) activeId.value = result.conv_id
   } catch (error) {
@@ -246,7 +256,7 @@ defineExpose({ startNewConversation, selectSession })
             <div v-if="message.role === 'assistant'" class="message-content markdown-content" v-html="renderMarkdown(message.content)"></div>
             <div v-else class="message-content">{{ message.content }}</div>
             <div v-if="message.role === 'assistant'" class="message-meta">
-              节点: {{ message.metadata?.agent_type || '未知' }} · 耗时: {{ formatLatency(message.metadata?.latency_ms) }} · 知识库: {{ message.metadata?.knowledge_used ? '已引用' : '无' }}
+              节点: {{ message.metadata?.agent_type || '未知' }} · 端到端耗时: {{ formatLatency(message.metadata?.latency_ms) }} · 知识库: {{ message.metadata?.knowledge_used ? '已引用' : '无' }}
             </div>
           </div>
           <div v-if="message.role === 'assistant' && (message.metadata?.escalated || message.metadata?.agent_recommended_handoff)" class="handoff-card">

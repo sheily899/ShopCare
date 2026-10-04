@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -191,6 +192,27 @@ def test_chat_profile_task_failure_does_not_change_http_success(monkeypatch):
         assert response.status_code == 200
         assert response.json()["response"] == "已生成只读技术排查建议。"
         assert any(item[0] == "update_profile" for item in memory.calls)
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_chat_reports_end_to_end_latency_and_preserves_orchestrator_latency(monkeypatch):
+    """ChatResponse 的 latency_ms 应覆盖 API 全链路，并保留编排阶段诊断值。"""
+
+    client, _, _, orchestrator = _prepare_app(monkeypatch)
+    original_run = orchestrator.run
+
+    async def delayed_run(request):
+        await asyncio.sleep(0.03)
+        return await original_run(request)
+
+    orchestrator.run = delayed_run
+    try:
+        response = client.post("/chat", json={"message": "请帮我排查登录问题"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["latency_ms"] > 10.0
+        assert body["intent_diagnostics"]["orchestrator_latency_ms"] == 4.5
     finally:
         client.__exit__(None, None, None)
 
