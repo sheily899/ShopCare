@@ -28,10 +28,109 @@ function escapeHtml(value) {
   return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;')
 }
 
-function renderMarkdown(value) {
-  let html = escapeHtml(value).replaceAll('\n', '<br>')
+function renderInlineMarkdown(value) {
+  let html = value
+  html = html.replace(/`([^`]+)`/g, '<code>$1</code>')
   html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
-  return html.replace(/(^|<br>)(#{1,3})\s([^<]+)/g, '$1<strong>$3</strong>')
+  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+  html = html.replace(/__([^_]+)__/g, '<strong>$1</strong>')
+  html = html.replace(/~~([^~]+)~~/g, '<del>$1</del>')
+  return html.replace(/\*([^*\n]+)\*/g, '<em>$1</em>')
+}
+
+function splitTableRow(line) {
+  const trimmed = line.trim().replace(/^\|/, '').replace(/\|$/, '')
+  return trimmed.split('|').map((cell) => cell.trim())
+}
+
+function isTableSeparator(line) {
+  const cells = splitTableRow(line)
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell))
+}
+
+function renderTable(lines) {
+  const headers = splitTableRow(lines[0]).map((cell) => `<th>${renderInlineMarkdown(escapeHtml(cell))}</th>`).join('')
+  const body = lines.slice(2).map((line) => {
+    const cells = splitTableRow(line)
+    return `<tr>${cells.map((cell) => `<td>${renderInlineMarkdown(escapeHtml(cell))}</td>`).join('')}</tr>`
+  }).join('')
+  return `<table><thead><tr>${headers}</tr></thead><tbody>${body}</tbody></table>`
+}
+
+function renderMarkdown(value) {
+  const lines = String(value ?? '').replace(/\r\n?/g, '\n').split('\n')
+  const output = []
+  let index = 0
+  while (index < lines.length) {
+    const line = lines[index]
+    if (!line.trim()) { index += 1; continue }
+
+    if (/^\s*```/.test(line)) {
+      const codeLines = []
+      index += 1
+      while (index < lines.length && !/^\s*```/.test(lines[index])) {
+        codeLines.push(lines[index])
+        index += 1
+      }
+      if (index < lines.length) index += 1
+      output.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`)
+      continue
+    }
+
+    if (index + 1 < lines.length && line.includes('|') && isTableSeparator(lines[index + 1])) {
+      const tableLines = [line, lines[index + 1]]
+      index += 2
+      while (index < lines.length && lines[index].trim() && lines[index].includes('|')) {
+        tableLines.push(lines[index])
+        index += 1
+      }
+      output.push(renderTable(tableLines))
+      continue
+    }
+
+    const heading = line.match(/^\s*(#{1,3})\s+(.+)$/)
+    if (heading) {
+      output.push(`<h${heading[1].length}>${renderInlineMarkdown(escapeHtml(heading[2]))}</h${heading[1].length}>`)
+      index += 1
+      continue
+    }
+
+    const unordered = line.match(/^\s*[-*+]\s+(.+)$/)
+    if (unordered) {
+      const items = []
+      while (index < lines.length) {
+        const item = lines[index].match(/^\s*[-*+]\s+(.+)$/)
+        if (!item) break
+        items.push(`<li>${renderInlineMarkdown(escapeHtml(item[1]))}</li>`)
+        index += 1
+      }
+      output.push(`<ul>${items.join('')}</ul>`)
+      continue
+    }
+
+    const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/)
+    if (ordered) {
+      const items = []
+      while (index < lines.length) {
+        const item = lines[index].match(/^\s*\d+[.)]\s+(.+)$/)
+        if (!item) break
+        items.push(`<li>${renderInlineMarkdown(escapeHtml(item[1]))}</li>`)
+        index += 1
+      }
+      output.push(`<ol>${items.join('')}</ol>`)
+      continue
+    }
+
+    const paragraph = []
+    while (index < lines.length && lines[index].trim()) {
+      const current = lines[index]
+      if (paragraph.length && (/^\s*```/.test(current) || /^\s*(#{1,3})\s+/.test(current) || /^\s*[-*+]\s+/.test(current) || /^\s*\d+[.)]\s+/.test(current))) break
+      paragraph.push(escapeHtml(current))
+      index += 1
+    }
+    output.push(`<p>${renderInlineMarkdown(paragraph.join('<br>'))}</p>`)
+  }
+  return output.join('')
 }
 
 function formatTime(value) {
@@ -39,8 +138,14 @@ function formatTime(value) {
 }
 
 function formatLatency(value) {
-  if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) return '—'
-  return Number(value).toFixed(2)
+  const milliseconds = Number(value)
+  if (value === null || value === undefined || value === '' || Number.isNaN(milliseconds) || milliseconds < 0) return '—'
+  const seconds = milliseconds / 1000
+  if (seconds < 60) return `${seconds.toFixed(2)} 秒`
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = Math.round(seconds % 60)
+  if (remainingSeconds === 0) return `${minutes} 分钟`
+  return `${minutes} 分 ${String(remainingSeconds).padStart(2, '0')} 秒`
 }
 
 const sessions = ref(readSessions())
@@ -141,7 +246,7 @@ defineExpose({ startNewConversation, selectSession })
             <div v-if="message.role === 'assistant'" class="message-content markdown-content" v-html="renderMarkdown(message.content)"></div>
             <div v-else class="message-content">{{ message.content }}</div>
             <div v-if="message.role === 'assistant'" class="message-meta">
-              节点: {{ message.metadata?.agent_type || '未知' }} · 耗时: {{ formatLatency(message.metadata?.latency_ms) }}ms · 知识库: {{ message.metadata?.knowledge_used ? '已引用' : '无' }}
+              节点: {{ message.metadata?.agent_type || '未知' }} · 耗时: {{ formatLatency(message.metadata?.latency_ms) }} · 知识库: {{ message.metadata?.knowledge_used ? '已引用' : '无' }}
             </div>
           </div>
           <div v-if="message.role === 'assistant' && (message.metadata?.escalated || message.metadata?.agent_recommended_handoff)" class="handoff-card">

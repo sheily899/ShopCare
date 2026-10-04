@@ -352,8 +352,8 @@ SkillManager.skills_dir/*.md
 | --- | --- |
 | `frontend/package.json` / `frontend/vite.config.js` | 锁定 Vue `^3.5.25`、Vite `^7.2.7` 与 Vue 插件 `^6.0.2`，提供 dev/build/preview 脚本；开发服务默认 localhost:5173。 |
 | `frontend/src/App.vue` | 提供会话/管理切换、统一的新对话操作与历史会话数量；通过抽屉式面板展示 `ChatView` 发出的 localStorage 会话摘要，不复制后端业务逻辑。 |
-| `frontend/src/views/ChatView.vue` | 实现悬浮白色工作卡片、空状态引导、3 个快捷问题、localStorage 会话持久化、ChatRequest 发送、消息元数据、两位小数耗时、转人工文案和安全 HTML 转义 Markdown 链接；对外暴露新建/切换会话方法。 |
-| `frontend/src/views/AdminView.vue` | 实现四个统计浮岛、文档上传与检索双卡片、10MB 文件上传状态反馈和内存 Trace 表格；移除技能列表与技能重载入口，耗时统一显示两位小数，嵌入模型展示为 CPU 简称。 |
+| `frontend/src/views/ChatView.vue` | 实现悬浮白色工作卡片、空状态引导、3 个快捷问题、localStorage 会话持久化、ChatRequest 发送、消息元数据、自适应秒/分钟耗时、转人工文案和安全 Markdown 渲染；对外暴露新建/切换会话方法。 |
+| `frontend/src/views/AdminView.vue` | 实现四个统计浮岛、文档上传与检索双卡片、10MB 文件上传状态反馈和内存 Trace 表格；移除技能列表与技能重载入口，耗时统一使用秒/分钟可读格式，嵌入模型展示为 CPU 简称。 |
 | `frontend/src/api/index.js` | 统一封装对 `http://localhost:8000` 的 fetch 请求：`/chat`、`/health`、`/search`、`/knowledge/upload`、`/skills`、`/skills/reload`、`/trace/tools`。 |
 | `frontend/src/styles.css` | 固化 `#F8FAFC` 画布、`#FFFFFF` 表面、`#F1F5F9` 灰槽、`#2D6A4F` 主色、环境光阴影和 12/14/18/20px 字号层级；实现导航胶囊、抽屉过渡、悬浮卡片、响应式表格，不引入 Emoji、图标库、霓虹特效或渐变。 |
 
@@ -375,7 +375,7 @@ AdminView
 ```
 
 - 前端只负责展示与请求编排，不执行订单查询、退款、支付、改地址、工单创建或真实人工接入。
-- Markdown 在浏览器端先做 HTML 字符转义，仅允许 `http`、`https`、`mailto` 链接；后端仍是事实安全边界。
+- Markdown 在浏览器端先做 HTML 字符转义，再将标题、强调、列表、代码块和表格转换为结构化 HTML，仅允许 `http`、`https`、`mailto` 链接；后端仍是事实安全边界。
 - 管理 API 的开放鉴权缺口与 Trace 重启丢失仍由后端事实边界负责；前端只展示接口返回的运行数据，断路器统计卡属于当前开发期工作台展示项，不新增后端能力。
 
 验证：`npm install` 成功安装 35 个依赖；`npm run build` 通过；`npm run dev -- --host localhost` 正常启动；`git diff --check` 通过。

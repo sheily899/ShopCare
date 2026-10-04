@@ -12,8 +12,14 @@ const notice = ref('')
 const errorMessage = ref('')
 
 function formatLatency(value) {
-  if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) return '—'
-  return Number(value).toFixed(2)
+  const milliseconds = Number(value)
+  if (value === null || value === undefined || value === '' || Number.isNaN(milliseconds) || milliseconds < 0) return '—'
+  const seconds = milliseconds / 1000
+  if (seconds < 60) return `${seconds.toFixed(2)} 秒`
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = Math.round(seconds % 60)
+  if (remainingSeconds === 0) return `${minutes} 分钟`
+  return `${minutes} 分 ${String(remainingSeconds).padStart(2, '0')} 秒`
 }
 
 function shortEmbeddingModel(value) {
@@ -135,7 +141,7 @@ onMounted(loadOverview)
         <table class="data-table">
           <thead><tr><th>请求ID</th><th>意图</th><th>处理节点</th><th>耗时</th></tr></thead>
           <tbody>
-            <tr v-for="trace in traces" :key="trace.request_id"><td>{{ trace.request_id }}</td><td>{{ trace.intent || '—' }}</td><td>{{ (trace.executed_agents || []).join('、') || '—' }}</td><td>{{ formatLatency(trace.latency_ms) }}ms</td></tr>
+            <tr v-for="trace in traces" :key="trace.request_id"><td>{{ trace.request_id }}</td><td>{{ trace.intent || '—' }}</td><td>{{ (trace.executed_agents || []).join('、') || '—' }}</td><td>{{ formatLatency(trace.latency_ms) }}</td></tr>
             <tr v-if="!traces.length"><td colspan="4" class="empty-cell">暂无调用轨迹</td></tr>
           </tbody>
         </table>

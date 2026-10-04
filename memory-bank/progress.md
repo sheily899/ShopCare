@@ -307,9 +307,10 @@
 - 视觉边界：画布 `#F8FAFC`、表面 `#FFFFFF`、嵌套灰槽 `#F1F5F9`、主色 `#2D6A4F`、边框 `#E2E8F0`；字号限制为标题 18/20px、正文 14px、元数据 12px；无 Emoji、机器人头像、状态点和发光特效。
 - 验证：`npm install` 成功安装 35 个依赖；`npm run build` 通过；`npm run dev -- --host localhost` 在 `http://localhost:5173/` 正常启动；`git diff --check` 通过。
 
-## Step 7.4 UI 微调：耗时显示精度
+## Step 7.4 UI 可读性优化：耗时单位与 Markdown 渲染
 
-- 修改：会话消息元数据和管理台 Trace 表中的 `latency_ms` 统一格式化为两位小数；缺失或非法值仍显示 `—`。
+- 修改：会话消息元数据和管理台 Trace 表中的 `latency_ms` 改为自适应人类可读单位：低于 60 秒显示两位小数秒，达到分钟后显示分钟与秒；缺失、非法或负值仍显示 `—`。
+- 修改：客服回复增加安全 Markdown 渲染，支持标题、加粗、斜体、删除线、行内代码、代码块、有序/无序列表和表格；先转义 HTML，仅允许 `http`、`https`、`mailto` 链接。
 - 边界：仅改变前端展示，不改变后端响应中的原始耗时数值和接口契约。
 
 ## Checkpoint 主链路
