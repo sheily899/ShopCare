@@ -35,10 +35,10 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    # 后端本地密钥与模型配置位于 backend/.env；敏感值只注入容器，不写入镜像。
+    env_file:
+      - ./backend/.env
     environment:
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-3-5-sonnet-20241022}
-      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
       REDIS_URL: redis://redis:6379/0
       CHROMA_HOST: chromadb
       CHROMA_PORT: "8000"
