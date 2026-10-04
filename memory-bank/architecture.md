@@ -102,3 +102,18 @@ Checkpoint C-1 已完成；Step 3.3 不在 API 路由中提前接入后台任务
 | `tests/test_knowledge_base_metadata.py` | 验证切片长度上限、七项 metadata 完整性、稳定 `source_chunk_id` 与 `score=round(1-distance,4)` 检索结果；低分结果不因 threshold 被过滤。 |
 
 Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 尚未开始。
+
+### Step 4.1 知识源文本与初始化脚本
+
+| 文件 | 职责 |
+| --- | --- |
+| `data/knowledge/refund_policy.md` | 退款申请、审核、原路退回时效与只读边界。 |
+| `data/knowledge/order_logistics.md` | 订单状态、物流时效、配送和改地址边界。 |
+| `data/knowledge/account_security.md` | 密码重置、两步验证和敏感信息保护。 |
+| `data/knowledge/technical_troubleshooting.md` | 401/403/404/500 错误码、网络和应用排查。 |
+| `data/knowledge/membership_points.md` | 会员等级、积分累计、抵扣和有效期规则。 |
+| `data/knowledge/invoice_and_payment.md` | 发票字段、支付失败和重复扣款核验边界。 |
+| `scripts/init_knowledge_base.py` | 扫描六篇 Markdown 源文档，复用 KnowledgeBase 切片和 metadata 规则，校验后写入产品 collection 并输出统计；不处理 benchmark 语料。 |
+| `tests/test_knowledge_base_ingestion.py` | 验证六篇源文档读取、500 字符切片上限、七项 metadata 和关键词召回 score。 |
+
+源文本是可审计的重建输入；老工程 `data/chroma` 的二进制索引不纳入 ShopCare，评测库保持独立 collection。
