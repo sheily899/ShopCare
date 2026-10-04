@@ -175,3 +175,13 @@
 - [x] Query Rewrite、并行召回、多级去重和高分保留通过。
 - [x] LLM Rerank 完整置换校验、正常重排和降级状态通过。
 - [x] `progress.md` 与 `architecture.md` 已同步。
+
+## Step 5.1：AgentToolSpec 与通用工具
+
+- 状态：已完成，等待人工确认后再进入 Step 5.2。
+- 创建：`agents/tools.py` 定义 `AgentToolSpec`、`make_tool`、通用工具 schema 与注册表；新增 `tests/test_agent_tools_general.py`。
+- 契约：工具 schema 强制 `type=object` 与 `additionalProperties=false`，`to_anthropic_tool()` 输出独立 schema 副本，handler 支持同步或异步执行。
+- 通用工具：`inspect_request_context` 只返回 request_id、intent、脱敏 user_id 和时间戳；`suggest_required_fields` 按意图返回下一轮补字段建议。
+- 安全边界：两个工具均为内存只读计算，不调用订单、支付、退款、改地址或人工坐席系统；非法入参统一返回结构化错误，不向主链路冒泡异常。
+- 验证：`.venv\Scripts\python.exe -m pytest -q tests/test_agent_tools_general.py` → `5 passed`；全量 pytest → `114 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+- 边界：未实现 Technical/Billing/Escalation 专属工具和四类 Agent profile；Step 5.2 未开始。

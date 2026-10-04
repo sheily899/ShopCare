@@ -178,3 +178,14 @@ Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker、Step 4.3 的
 Rerank 只消费 Step 4.3 已完成去重的候选列表，不引入 Cross-Encoder、不产生数值型 rerank score，也不设置 Chroma score threshold。Step 4.3 的 `search_with_rewrite` 仍保持完整候选集语义，具体 Rerank 由调用方显式使用 `rerank_results(...)`。
 
 验证：Step 4.4 专项、Step 4.3 和 Step 4.2 回归共 `21 passed`；全量 pytest `109 passed`；compileall 与 `git diff --check` 通过。
+
+## Step 5.1：AgentToolSpec 与通用工具
+
+| 文件 | 职责 |
+| --- | --- |
+| `agents/tools.py` | 定义 `AgentToolSpec` 工具元数据与 handler 契约；构造时强制校验 JSON Schema 为 object 且 `additionalProperties=false`，通过 `to_anthropic_tool()` 导出 Anthropic Tool Use 声明。实现 `inspect_request_context` 的只读脱敏请求快照、`suggest_required_fields` 的意图字段建议和 `general_tools()` 注册表；不连接任何外部订单/支付系统。 |
+| `tests/test_agent_tools_general.py` | 覆盖 schema 硬约束、Anthropic 声明导出、通用工具注册、user_id 脱敏、退款/技术字段建议和非法入参安全错误。 |
+
+本阶段只建立通用只读工具层，未实现 Technical/Billing/Escalation 工具、Agent profile 或真实业务写操作；Step 5.2 继续保持未开始状态。
+
+验证：Step 5.1 专项测试 `5 passed`；全量 pytest `114 passed`；`compileall agents tests` 与 `git diff --check` 通过。
