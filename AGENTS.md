@@ -15,6 +15,13 @@
 - `memory-bank/progress.md` 记录施工进度；`memory-bank/architecture.md` 记录新建代码文件的职责。
 - 先确认当前任务属于已批准的 P0/P1/P2 范围；未确认的扩展想法记录为待决策项，不直接实现。
 
+## 当前仓库目录布局
+
+- `frontend/`：Vue 3 + Vite 前端工程，独立维护 Node 依赖和构建产物。
+- `backend/`：Python/FastAPI 后端工程，包含 `api/`、`agents/`、`core/`、`memory/`、`mcp/`、`scripts/`、`tests/`、`data/knowledge/`、`requirements.txt` 与 `.env.example`。
+- `memory-bank/`：跨阶段规格、施工计划、进度和架构记录，保留在仓库根目录。
+- 根目录：保留项目级规则、Git 配置和前端/后端入口说明；`.venv`、缓存、本地模型和运行时数据不提交 Git。
+
 ## 事实与边界
 
 - 以 `memory-bank/system-spec.md` 为代码事实基线，以 `memory-bank/PRD.md` 为产品范围基线。
@@ -30,7 +37,7 @@
 - 不提交密钥、`.env`、运行期数据、缓存或生成结果。
 - 完成代码变更后同步更新 `memory-bank/progress.md` 与 `memory-bank/architecture.md`，并检查规格文档是否过期。
 - 提交前检查 `git status`、`git diff`、测试结果和实际影响范围。
-- GitHub 目标仓库为 `https://github.com/sheily899/ShopCare.git`。当前目录尚未初始化 Git 仓库；首次施工前先确认本地仓库与该 remote 的连接方式。默认先完成本地 commit，只有在明确具备推送授权且需要远端同步时才执行 push。
+- GitHub 目标仓库为 `https://github.com/sheily899/ShopCare.git`。当前仓库已初始化 Git；继续默认先完成本地 commit，只有在明确具备推送授权且需要远端同步时才执行 push。
 
 ## 代码注释规范（铁律）
 

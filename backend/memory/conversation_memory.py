@@ -584,7 +584,7 @@ class MemoryManager:
                 client = chromadb.HttpClient(host=host, port=port)
             else:
                 client = chromadb.PersistentClient(
-                    path=os.getenv("CHROMA_PERSIST_DIRECTORY", "./data/chroma")
+                    path=os.getenv("CHROMA_PERSIST_DIRECTORY", ".data/chroma")
                 )
             self._episodic = client.get_or_create_collection("episodic")
         except Exception as exc:
@@ -624,7 +624,7 @@ class MemoryManager:
                 client = chromadb.HttpClient(host=host, port=port)
             else:
                 client = chromadb.PersistentClient(
-                    path=os.getenv("CHROMA_PERSIST_DIRECTORY", "./data/chroma")
+                    path=os.getenv("CHROMA_PERSIST_DIRECTORY", ".data/chroma")
                 )
             self._profile = client.get_or_create_collection("user_profile")
         except Exception as exc:

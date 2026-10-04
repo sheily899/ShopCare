@@ -1,5 +1,18 @@
 # ShopCare 代码职责记录
 
+## 当前仓库目录布局（2026-10-04）
+
+当前可执行工程已按前后端分离整理：
+
+| 目录 | 职责 |
+| --- | --- |
+| `frontend/` | Vue 3 + Vite 会话与管理界面。 |
+| `backend/` | Python/FastAPI API、Agent、意图、记忆、MCP、脚本、测试、知识源和后端依赖配置。 |
+| `memory-bank/` | 规格、设计、实施计划、进度与架构记录，保留在仓库根目录。 |
+| `AGENTS.md`、`.gitignore`、`pytest.ini` | 项目级规则、忽略边界和根目录测试入口。 |
+
+本节之后早期 Step 记录中的 `api/`、`agents/`、`tests/` 等路径是重构前的历史路径；当前对应位置统一为 `backend/<原路径>/`。历史记录保留用于追踪，不代表仍存在同名根目录。
+
 ## Step 1.1：环境基线
 
 | 文件 | 职责 |
@@ -140,7 +153,7 @@ Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker、Step 4.3 的
 
 ### Step 4.1：本机 BGE 模型复用
 
-运行时发现并复用了 Lenovo RAG 模块中的本地模型目录，复制到 `models/BAAI/bge-small-zh-v1.5`。当前目录包含完整 tokenizer、Transformer 配置、Pooling 配置和 `model.safetensors`/`pytorch_model.bin`，使用 ShopCare `.venv` 在 CPU 上加载成功，输出维度为 512；由于源目录的内部 `_name_or_path` 记录为 `BAAI_bge-small-zh`，文档将其标记为已验证可运行的本机复用候选，而非凭文件名声称远程仓库版本绝对一致。
+运行时发现并复用了 Lenovo RAG 模块中的本地模型目录，复制到 `backend/models/BAAI/bge-small-zh-v1.5`。当前目录包含完整 tokenizer、Transformer 配置、Pooling 配置和 `model.safetensors`/`pytorch_model.bin`，使用 ShopCare `.venv` 在 CPU 上加载成功，输出维度为 512；由于源目录的内部 `_name_or_path` 记录为 `BAAI_bge-small-zh`，文档将其标记为已验证可运行的本机复用候选，而非凭文件名声称远程仓库版本绝对一致。
 
 正式运行时通过环境变量指定本地目录：
 

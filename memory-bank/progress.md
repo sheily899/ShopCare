@@ -313,3 +313,11 @@
 - [x] 会话历史可本地持久化，新建/切换会话与 `conv_id` 对齐。
 - [x] 管理界面接入知识检索、文档上传、技能热加载和内存 Trace 查询，并保留后端安全边界说明。
 - [x] Step 7.4 前端构建与开发服务器启动验证通过；Step 8 未开始。
+
+## 目录重构：前后端分离
+
+- 状态：已完成目录移动，保留历史施工记录和根目录 `memory-bank/`。
+- `backend/`：集中 Python 后端源代码、脚本、测试、六篇知识源、依赖文件、Chroma 运行数据和本地 BGE 模型目录。
+- `frontend/`：继续作为独立 Vue 3 + Vite 工程；根目录 `pytest.ini` 将后端测试路径映射到 `backend/tests/`。
+- 根目录保留：`AGENTS.md`、`.gitignore`、`pytest.ini`、`memory-bank/`、Git 元数据；`.venv`、缓存、模型和运行时数据不提交。
+- 运行入口：`python -m uvicorn api.main:app --app-dir backend --reload`；知识库脚本：`python backend/scripts/init_knowledge_base.py`。

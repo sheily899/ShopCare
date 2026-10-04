@@ -3,6 +3,10 @@
 版本：0.1  
 事实来源：system-spec.md、design-document.md、原工程 requirements.txt 与 Docker 配置。
 
+当前代码布局：Python 后端依赖文件位于 `backend/requirements.txt`，环境模板位于
+`backend/.env.example`；前端工程独立位于 `frontend/`。在仓库根目录运行测试时由
+`pytest.ini` 将 `backend/` 加入 Python 路径。
+
 ## 1. 技术栈总览
 
 ShopCare 保持原工程的原生 Python 异步架构，不引入新的 Agent 编排框架。
@@ -75,7 +79,7 @@ Docker 构建额外执行：
     .venv\Scripts\Activate.ps1
     python -m pip install --upgrade pip
     pip install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1+cpu
-    pip install -r requirements.txt
+    pip install -r backend/requirements.txt
 
 校验：
 
@@ -185,7 +189,7 @@ HTTP 优先、PersistentClient fallback 的顺序必须保留；fallback 发生�
     hnsw:space=l2
 
 本机离线运行可将 `CUSTOMEROPS_EMBEDDING_MODEL` 覆盖为相对目录
-`models/BAAI/bge-small-zh-v1.5`（该目录为已验证可加载的本机复用模型，二进制不纳入 Git）；默认值仍保持远程模型标识，避免把个人机器路径写入通用配置。
+`backend/models/BAAI/bge-small-zh-v1.5`（该目录为已验证可加载的本机复用模型，二进制不纳入 Git）；默认值仍保持远程模型标识，避免把个人机器路径写入通用配置。
 
 长期记忆：
 

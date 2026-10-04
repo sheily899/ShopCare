@@ -8,7 +8,11 @@ __pycache__/
 .data/
 .cache/
 models/
+backend/models/
+backend/data/chroma/
+backend/.data/
 data/runtime/
+data/chroma/
 *.log
 frontend/node_modules/
 frontend/dist/
