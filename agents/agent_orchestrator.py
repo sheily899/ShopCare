@@ -11,6 +11,7 @@ import asyncio
 import inspect
 import json
 import logging
+import os
 import time
 import uuid
 from abc import ABC
@@ -1060,6 +1061,180 @@ def _friendly_failure(agent_type: AgentType, latency_ms: float = 0.0) -> AgentRe
     )
 
 
+class ResponseComposer:
+    """把多个领域 Agent 的成功结果合成为面向客户的中文回复。
+
+    Args:
+        client: 可选的 Anthropic 异步客户端；未注入时多结果合成安全降级。
+        model: 合成模型名称；未提供时使用项目默认模型。
+
+    Returns:
+        `compose()` 返回纯客户可见文本；LLM 失败时返回确定性拼接文本。
+
+    该类只负责语义合并，不执行知识检索、订单写操作、退款确认或人工坐席转接。
+    """
+
+    DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
+    DEFAULT_TEMPERATURE = 0.1
+    DEFAULT_MAX_TOKENS = 1000
+
+    def __init__(self, client: Optional[Any] = None, model: Optional[str] = None) -> None:
+        self.client = client
+        self.model = model or self.DEFAULT_MODEL
+        self.temperature = self._read_float_env(
+            "CUSTOMEROPS_COMPOSER_TEMPERATURE", self.DEFAULT_TEMPERATURE
+        )
+        self.max_tokens = self._read_int_env(
+            "CUSTOMEROPS_COMPOSER_MAX_TOKENS", self.DEFAULT_MAX_TOKENS
+        )
+
+    @staticmethod
+    def _read_float_env(name: str, default: float) -> float:
+        """读取合成温度配置，非法值回退到锁定默认值。"""
+
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            value = float(raw)
+            return value if 0.0 <= value <= 1.0 else default
+        except (TypeError, ValueError):
+            logger.warning("ResponseComposer 配置 %s 无法解析，回退默认值 %s", name, default)
+            return default
+
+    @staticmethod
+    def _read_int_env(name: str, default: int) -> int:
+        """读取最大输出 Token 配置，非法值回退到锁定默认值。"""
+
+        raw = os.getenv(name)
+        if raw is None:
+            return default
+        try:
+            value = int(raw)
+            return value if value > 0 else default
+        except (TypeError, ValueError):
+            logger.warning("ResponseComposer 配置 %s 无法解析，回退默认值 %s", name, default)
+            return default
+
+    @staticmethod
+    def _successful(responses: List[AgentResponse]) -> List[AgentResponse]:
+        """过滤成功且有可见文本的分支，避免把失败详情交给合成模型。"""
+
+        return [
+            response
+            for response in responses
+            if isinstance(response, AgentResponse)
+            and response.success
+            and bool((response.content or "").strip())
+        ]
+
+    @staticmethod
+    def _fallback(
+        successful: List[AgentResponse],
+        primary_agent: Optional[AgentType] = None,
+    ) -> str:
+        """按固定主次顺序拼接合成失败时的安全回复。"""
+
+        if not successful:
+            return "抱歉，所有 Agent 均处理失败。"
+        primary = next(
+            (item for item in successful if item.agent_type is primary_agent),
+            successful[0],
+        )
+        supporting = [item for item in successful if item is not primary]
+        output = primary.content
+        for support in supporting:
+            output += f"\n\n补充说明：\n{support.content}"
+        return output
+
+    @staticmethod
+    def _extract_text(response: Any) -> str:
+        """从 Anthropic 响应中提取文本块。"""
+
+        text_parts = [
+            str(_mapping_value(block, "text", ""))
+            for block in _response_blocks(response)
+            if _mapping_value(block, "type") == "text"
+        ]
+        return "\n".join(part for part in text_parts if part).strip()
+
+    def _build_prompt(
+        self,
+        request: Request,
+        primary: AgentResponse,
+        supporting: List[AgentResponse],
+    ) -> str:
+        """构造只包含当前请求与分支结论的合成提示。"""
+
+        support_text = "\n\n".join(
+            f"补充分支 {index}（内部类型：{response.agent_type.value}，不要在输出中提及该类型）：\n{response.content}"
+            for index, response in enumerate(supporting, start=1)
+        )
+        return (
+            "你是 ShopCare 的客户回复合成器。请以主处理分支的结论为主体，"
+            "吸收补充分支中不重复且不冲突的信息，删除重复开场白并平滑处理冲突。\n"
+            "严禁无中生有编造订单发货、退款成功或后台查询结果；只输出面向客户的纯净中文段落，"
+            "不得暴露内部 Agent 专有名词。\n\n"
+            f"用户问题：{request.message}\n\n"
+            f"主处理分支类型（仅供内部排序，不要在输出中提及）：{primary.agent_type.value}\n"
+            f"主处理分支结论：\n{primary.content}\n\n"
+            f"补充信息：\n{support_text}"
+        )
+
+    async def compose(
+        self,
+        request: Request,
+        responses: List[AgentResponse],
+        primary_agent: Optional[AgentType] = None,
+    ) -> str:
+        """按成功分支数量合并客户回复，并在失败时确定性降级。
+
+        Args:
+            request: 当前用户请求，仅用于合成 Prompt 的问题上下文。
+            responses: Fan-out 返回的 Agent 响应列表。
+            primary_agent: 路由选定的主 Agent，用于确定主次顺序。
+
+        Returns:
+            单结果直接文本、多结果合成文本或固定降级拼接文本。
+        """
+
+        successful = self._successful(responses)
+        if not successful:
+            return self._fallback(successful, primary_agent)
+        if len(successful) == 1:
+            # Why：单分支无需再次请求模型，避免额外 Token 与合成延迟。
+            return successful[0].content
+
+        primary = next(
+            (item for item in successful if item.agent_type is primary_agent),
+            successful[0],
+        )
+        supporting = [item for item in successful if item is not primary]
+        if self.client is None:
+            logger.warning("ResponseComposer 未配置 Anthropic client，使用确定性拼接降级")
+            return self._fallback(successful, primary_agent)
+        try:
+            response = await self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                system=(
+                    "只输出面向客户的中文回复。不要输出分析过程、内部 Agent 名称或未被证实的外部业务结果。"
+                ),
+                messages=[
+                    {"role": "user", "content": self._build_prompt(request, primary, supporting)}
+                ],
+            )
+            text = self._extract_text(response)
+            if not text:
+                raise ValueError("合成模型未返回文本")
+            return text
+        except Exception as exc:
+            # Why：合成器故障不能让已成功的领域答案白屏，确定性拼接保留事实信息。
+            logger.warning("ResponseComposer 合成失败，降级拼接：%s", exc)
+            return self._fallback(successful, primary_agent)
+
+
 async def _execute(
     request: Request,
     agent_type: AgentType,
@@ -1118,7 +1293,7 @@ async def _execute(
     )
 
 
-@dataclass
+@dataclass(frozen=True)
 class OrchestratorResult:
     request_id: str
     response: str
@@ -1188,15 +1363,17 @@ async def _fan_out(
 
 
 class AgentOrchestrator:
-    """Step 6.2 的轻量编排入口，负责 Fan-out、知识预检索和 Trace 聚合。
+    """负责 Fan-out、知识预检索、结果合成和 Trace 聚合的轻量编排入口。
 
     Args:
         agent_pool: 可注入的 Agent 映射，默认使用模块级四类 Agent 池。
         knowledge_search: 可注入的知识检索函数或提供 `search` 方法的对象。
+        knowledge_base: `knowledge_search` 的兼容别名。
+        composer: 可注入的结果合成器；未提供时使用无网络的 `ResponseComposer`。
 
     Returns:
         `run()` 和 `run_parallel()` 返回 `OrchestratorResult`。本阶段不包含
-        ResponseComposer；多路成功结果保留主 Agent 文本，完整专业结果通过 Trace 返回。
+        订单写操作、退款确认或真实人工坐席转接。
     """
 
     def __init__(
@@ -1204,11 +1381,13 @@ class AgentOrchestrator:
         agent_pool: Optional[Mapping[AgentType, Any]] = None,
         knowledge_search: Optional[Any] = None,
         knowledge_base: Optional[Any] = None,
+        composer: Optional[ResponseComposer] = None,
     ) -> None:
         self.agent_pool: Dict[AgentType, Any] = dict(
             AGENT_POOL if agent_pool is None else agent_pool
         )
         self.knowledge_search = knowledge_search or knowledge_base
+        self.composer = composer or ResponseComposer()
         self._recent_traces: deque[Dict[str, Any]] = deque(maxlen=200)
 
     def _decision(self, request: Request) -> RoutingDecision:
@@ -1216,32 +1395,60 @@ class AgentOrchestrator:
 
         return _route_decision(request, agent_pool=self.agent_pool)
 
+    async def _compose_responses(
+        self,
+        request: Request,
+        responses: List[AgentResponse],
+        primary_agent: Optional[AgentType],
+    ) -> str:
+        """调用注入合成器，并兼容只接受两个位置参数的测试替身。"""
+
+        compose = getattr(self.composer, "compose", None)
+        if not callable(compose):
+            logger.warning("ResponseComposer 未提供 compose 方法，使用确定性拼接降级")
+            return ResponseComposer._fallback(responses, primary_agent)
+        try:
+            parameters = inspect.signature(compose).parameters
+            accepts_kwargs = any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            if accepts_kwargs or "primary_agent" in parameters:
+                return await compose(request, responses, primary_agent=primary_agent)
+            return await compose(request, responses)
+        except Exception as exc:
+            # Why：合成器属于可选增强层，异常必须回退到事实保真的主次拼接。
+            logger.warning("编排层调用 ResponseComposer 失败，降级拼接：%s", exc)
+            return ResponseComposer._fallback(responses, primary_agent)
+
     async def run_parallel(
         self,
         request: Request,
         decision: RoutingDecision,
     ) -> OrchestratorResult:
-        """并发执行路由中的 Agent，并聚合成功结果与工具 Trace。
+        """并发执行路由中的 Agent，合成客户回复并聚合工具 Trace。
 
         Args:
             request: 当前内部请求。
             decision: 主/辅助 Agent 决策。
 
         Returns:
-            包含主 Agent 文本、成功 Agent 列表、去重工具清单和检索阶段 Trace 的结果。
+            包含最终客户文本、成功 Agent 列表、去重工具清单和检索阶段 Trace 的结果。
         """
 
         started = time.perf_counter()
-        responses = await _fan_out(
+        valid = await _fan_out(
             request,
             decision,
             knowledge_search=self.knowledge_search,
             agent_pool=self.agent_pool,
         )
+        # Fan-out 只接受结构完整的响应；成功筛选再次放在合成入口，避免测试替身或未来扩展泄漏失败文案。
+        successful = ResponseComposer._successful(valid)
         tools_used = _dedupe_preserving_order(
-            [tool_name for response in responses for tool_name in response.tools_used]
+            [tool_name for response in successful for tool_name in response.tools_used]
         )
-        tool_traces = [trace for response in responses for trace in response.tool_traces]
+        tool_traces = [trace for response in successful for trace in response.tool_traces]
         retrieval_stage = [
             trace
             for trace in tool_traces
@@ -1250,8 +1457,8 @@ class AgentOrchestrator:
         diagnostics = dict(request.intent_diagnostics or {})
         diagnostics["retrieval_stage"] = retrieval_stage
         primary_response = next(
-            (response for response in responses if response.agent_type is decision.primary_agent),
-            responses[0] if responses else None,
+            (response for response in successful if response.agent_type is decision.primary_agent),
+            successful[0] if successful else None,
         )
         if primary_response is None:
             # Why：所有分支失败时返回固定安全提示，不把异常详情暴露给用户。
@@ -1259,9 +1466,13 @@ class AgentOrchestrator:
             result_agent_type = decision.primary_agent or AgentType.GENERAL
             agent_types: List[AgentType] = []
         else:
-            response_text = primary_response.content
+            response_text = await self._compose_responses(
+                request,
+                successful,
+                decision.primary_agent,
+            )
             result_agent_type = primary_response.agent_type
-            agent_types = [response.agent_type for response in responses]
+            agent_types = [response.agent_type for response in successful]
         result = OrchestratorResult(
             request_id=request.request_id,
             response=response_text,
@@ -1282,7 +1493,7 @@ class AgentOrchestrator:
                 request.urgency is UrgencyLevel.CRITICAL
                 or request.intent is IntentCategory.HUMAN_HANDOFF
             ),
-            agent_recommended_handoff=any(response.escalate for response in responses),
+            agent_recommended_handoff=any(response.escalate for response in successful),
         )
         self._recent_traces.append(
             {

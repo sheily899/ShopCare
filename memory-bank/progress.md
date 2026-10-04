@@ -243,3 +243,21 @@
 - Trace：聚合去重后的 `tools_used`，保留 `tool_name`、`input`、`latency_ms`、`status`、`retrieval_stage`、召回切片和摘要预览；在 `intent_diagnostics["retrieval_stage"]` 与内存 Trace 队列中保存。
 - 验证：Step 6.2 专项 `4 passed`；相关 Agent/路由回归 `14 passed`；全量 pytest `141 passed`；`compileall agents tests` 与 `git diff --check` 通过。
 - 边界：未实现 ResponseComposer 语义合并、最终 Fan-in 冲突消解和 Step 6.3。
+
+## Step 6.3：ResponseComposer 语义合并与 OrchestratorResult 装配
+
+- 状态：已完成，Checkpoint D 已闭环；等待人工确认后再进入 Step 7。
+- 修改：扩展 `agents/agent_orchestrator.py`，新增 `ResponseComposer`、多结果合成/确定性降级和 `AgentOrchestrator` 的完整 `OrchestratorResult` 装配；新增 `tests/test_response_composer.py`。
+- 单结果：仅一个成功分支时直接返回其 content，不额外调用 Composer LLM，降低 Token 消耗与延迟。
+- 多结果：以路由主 Agent 结论为主体调用 Anthropic 合成，默认 `temperature=0.1`、`max_tokens=1000`，支持 `CUSTOMEROPS_COMPOSER_TEMPERATURE` 与 `CUSTOMEROPS_COMPOSER_MAX_TOKENS` 覆盖；Prompt 要求去重、平滑冲突、只输出中文客户段落且不编造外部业务结果。
+- 降级：Composer 未配置、超时、异常或空文本时，按主结果加 `\n\n补充说明：\n` 和辅助结果固定拼接；全盘失败返回 `抱歉，所有 Agent 均处理失败。`。
+- 结果装配：`OrchestratorResult` 使用 `@dataclass(frozen=True)` 汇聚合成文本、主/辅助 Agent、路由原因与置信度、耗时、去重 `tools_used`、`tool_traces`、检索阶段诊断、secondary intents 和 handoff 标志。
+- 安全边界：只处理已成功的内部 Agent 文本，不执行订单、支付、退款、后台查询或真实人工接入；不引入新第三方依赖。
+- 验证：`tests/test_response_composer.py` → `5 passed`；Agent/Fan-out 回归 → `9 passed`；全量 pytest → `146 passed`；compileall 与 `git diff --check` 通过。
+
+## Checkpoint D：编排与 Fan-in
+
+- [x] 单结果直出、多结果语义合成和 Composer 异常确定性拼接通过。
+- [x] 全盘失败固定安全文案和局部异常隔离通过。
+- [x] `OrchestratorResult` 完整装配合成文本、路由、Agent、工具、Trace 与检索诊断元数据。
+- [x] `progress.md` 与 `architecture.md` 已同步。

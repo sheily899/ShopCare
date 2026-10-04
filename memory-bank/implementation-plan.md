@@ -601,10 +601,10 @@ Step 1 契约与环境
 
 ### Checkpoint D
 
-- [ ] 路由评分、澄清、降级、fan-out/fan-in 通过。
-- [ ] 强制检索只执行一次且 trace 保留。
-- [ ] Composer 成功/失败路径通过。
-- [ ] 更新 progress.md 和 architecture.md。
+- [x] 路由评分、澄清、降级、fan-out/fan-in 通过。
+- [x] 强制检索只执行一次且 trace 保留。
+- [x] Composer 成功/失败路径通过。
+- [x] 更新 progress.md 和 architecture.md。
 
 ## Step 7：FastAPI 路由集成与主链路联调
 

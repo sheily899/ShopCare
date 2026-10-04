@@ -245,3 +245,14 @@ Step 5.3 只提供结构化上下文快照，不执行任何真实工单、订�
 本阶段仅完成 Fan-out 与证据/Trace 汇聚，不实现 ResponseComposer 的语义合并；多路成功时暂保留主 Agent 文本，专业分支完整结果通过结构化 Trace 返回。知识检索失败只标记 failed 状态并注入谨慎提示，不伪造召回内容。
 
 验证：Step 6.2 专项 `4 passed`；相关 Agent/路由回归 `14 passed`；全量 pytest `141 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+
+## Step 6.3：ResponseComposer 语义合并与结果装配
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `agents/agent_orchestrator.py` | 新增 `ResponseComposer`，按成功分支数量执行单结果直出、多结果 Anthropic 语义合并、异常确定性拼接和全盘失败固定兜底；`AgentOrchestrator.run_parallel` 将合成文本、Agent 类型、路由信息、耗时、工具清单、工具 Trace、检索阶段诊断和 handoff 标志完整装配进 `@dataclass(frozen=True) OrchestratorResult`。 |
+| `tests/test_response_composer.py` | 覆盖单结果不调用合成模型、多结果参数与安全 Prompt、合成异常固定拼接、编排结果元数据和全盘失败文案。 |
+
+合成默认使用 `temperature=0.1`、`max_tokens=1000`，可由 `CUSTOMEROPS_COMPOSER_TEMPERATURE` 和 `CUSTOMEROPS_COMPOSER_MAX_TOKENS` 覆盖。合成 Prompt 只允许输出中文客户段落，要求以主结论为主体、去除重复寒暄、平滑冲突，并禁止编造订单、退款或后台查询结果。合成器不执行任何外部业务写操作，也不引入 Cross-Encoder 或其他新依赖。
+
+验证：Step 6.3 专项 `5 passed`；Agent/Fan-out 回归 `9 passed`；全量 pytest `146 passed`；`compileall agents tests` 与 `git diff --check` 通过。
