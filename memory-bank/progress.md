@@ -298,13 +298,13 @@
 - [x] `/search`、知识入库/上传、知识库统计、Trace 查询、Skill 列表/热加载路由通过离线测试。
 - [x] Trace 明确为最多 200 条内存运行期数据，服务重启后丢失；更新 `progress.md` 与 `architecture.md`。
 
-## Step 7.4：Vue 3 + Vite 前端双栏工作台
+## Step 7.4：Vue 3 + Vite 前端工作台与质感层级重构
 
 - 状态：已完成，Step 7 前后端主链路与管理界面已闭环；等待人工确认后再进入 Step 8。
-- 修改：新增 `frontend/` Vue 3 + Vite 工程，包含 `App.vue`、`ChatView.vue`、`AdminView.vue`、`src/api/index.js`、入口文件与严格三色/三字号样式；`.gitignore` 忽略 `frontend/node_modules/` 与 `frontend/dist/`。
-- 会话视图：左侧 240px 历史会话栏支持新建、切换和 `shopcare_sessions` localStorage 持久化；右侧支持引导短语、回车发送、ChatResponse 元数据、转人工动态提示与安全 Markdown 链接渲染。
-- 管理视图：展示 `/health` 知识库概况；接入 `/search`、`/knowledge/upload`、`/skills`、`/skills/reload`、`/trace/tools`；上传沿用后端 10MB 与 txt/md/json 边界；断路器状态未由当前后端暴露，界面明确显示“未暴露”。
-- 视觉边界：画布 CREMA、强调 TOMATO、提示 PEAR；辅助文字使用深炭褐/白/灰；字号只使用 12/14/18px；无 Emoji、机器人头像、状态圆点、渐变或阴影。
+- 修改：保留 `frontend/` Vue 3 + Vite 工程与后端 API 边界，重构 `App.vue`、`ChatView.vue`、`AdminView.vue` 及全局样式，建立浅灰画布、白色表面、深森林绿主色和环境光阴影令牌。
+- 会话视图：顶部导航提供会话/管理切换、历史会话数量、新对话；历史记录改为 320px 抽屉式滑出面板，继续使用 `shopcare_sessions` localStorage 持久化；会话主体采用 960px 悬浮白色工作卡片，保留 ChatResponse 元数据、转人工提示与安全 Markdown 链接渲染。
+- 管理视图：知识库、切片数量、嵌入模型与断路器状态拆分为四个统计浮岛；知识维护、检索探针和 Trace 表格均采用独立卡片与留白布局，继续接入既有 `/health`、`/search`、`/knowledge/upload`、`/skills/reload`、`/trace/tools`。
+- 视觉边界：画布 `#F8FAFC`、表面 `#FFFFFF`、嵌套灰槽 `#F1F5F9`、主色 `#2D6A4F`、边框 `#E2E8F0`；字号限制为标题 18/20px、正文 14px、元数据 12px；无 Emoji、机器人头像、状态点和发光特效。
 - 验证：`npm install` 成功安装 35 个依赖；`npm run build` 通过；`npm run dev -- --host localhost` 在 `http://localhost:5173/` 正常启动；`git diff --check` 通过。
 
 ## Step 7.4 UI 微调：耗时显示精度

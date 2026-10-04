@@ -2,9 +2,10 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import { sendChat } from '../api/index.js'
 
+const emit = defineEmits(['sessions-changed'])
 const STORAGE_KEY = 'shopcare_sessions'
 const USER_ID = 'anonymous'
-const quickPrompts = ['退换货运费险规定', '设备开机故障排查', '发票开具时效说明', '退款审核规则']
+const quickPrompts = ['退款申请', '技术排查', '发票咨询']
 
 function createId() {
   return globalThis.crypto?.randomUUID?.() || `conv-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -24,19 +25,13 @@ function createSession() {
 }
 
 function escapeHtml(value) {
-  return String(value)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;')
+  return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;')
 }
 
 function renderMarkdown(value) {
   let html = escapeHtml(value).replaceAll('\n', '<br>')
   html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>')
-  html = html.replace(/(^|<br>)(#{1,3})\s([^<]+)/g, '$1<strong>$3</strong>')
-  return html
+  return html.replace(/(^|<br>)(#{1,3})\s([^<]+)/g, '$1<strong>$3</strong>')
 }
 
 function formatTime(value) {
@@ -59,8 +54,18 @@ const stream = ref(null)
 const activeSession = computed(() => sessions.value.find((session) => session.id === activeId.value) || sessions.value[0])
 const messages = computed(() => activeSession.value?.messages || [])
 
+function sessionSummary(session) {
+  const firstUserMessage = session.messages.find((item) => item.role === 'user')?.content || '新会话'
+  return { id: session.id, title: firstUserMessage, createdAt: formatTime(session.createdAt) }
+}
+
+function emitSessionSummaries() {
+  emit('sessions-changed', sessions.value.map(sessionSummary))
+}
+
 function persist() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions.value))
+  emitSessionSummaries()
 }
 
 function updateSession(session) {
@@ -78,7 +83,7 @@ function startNewConversation() {
 }
 
 function selectSession(id) {
-  activeId.value = id
+  if (sessions.value.some((session) => session.id === id)) activeId.value = id
   errorMessage.value = ''
 }
 
@@ -92,12 +97,7 @@ async function submit(message = input.value) {
   sending.value = true
   try {
     const result = await sendChat({ message: text, userId: USER_ID, convId: session.id })
-    const assistantMessage = {
-      role: 'assistant',
-      content: result.response || '当前没有可展示的回复。',
-      createdAt: new Date().toISOString(),
-      metadata: result,
-    }
+    const assistantMessage = { role: 'assistant', content: result.response || '当前没有可展示的回复。', createdAt: new Date().toISOString(), metadata: result }
     updateSession({ ...session, id: result.conv_id || session.id, messages: [...session.messages, assistantMessage] })
     if (result.conv_id && result.conv_id !== activeId.value) activeId.value = result.conv_id
   } catch (error) {
@@ -108,47 +108,31 @@ async function submit(message = input.value) {
 }
 
 function onKeydown(event) {
-  if (event.key === 'Enter' && !event.shiftKey) {
+  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
     event.preventDefault()
     submit()
   }
 }
 
+watch(sessions, emitSessionSummaries, { deep: true, immediate: true })
 watch(messages, async () => {
   await nextTick()
   if (stream.value) stream.value.scrollTop = stream.value.scrollHeight
 }, { deep: true })
+
+defineExpose({ startNewConversation, selectSession })
 </script>
 
 <template>
-  <section class="chat-layout" aria-label="会话工作区">
-    <aside class="session-sidebar">
-      <button class="outline-button new-session" type="button" @click="startNewConversation">开启新对话</button>
-      <div class="sidebar-label">历史会话</div>
-      <div class="session-list" role="list">
-        <button
-          v-for="session in sessions"
-          :key="session.id"
-          class="session-item"
-          :class="{ selected: session.id === activeId }"
-          type="button"
-          role="listitem"
-          @click="selectSession(session.id)"
-        >
-          <span class="session-title">{{ session.messages.find((item) => item.role === 'user')?.content || '新会话' }}</span>
-          <span class="session-time">{{ formatTime(session.createdAt) }}</span>
-        </button>
-      </div>
-    </aside>
-
-    <section class="chat-panel">
+  <section class="chat-workspace" aria-label="会话工作区">
+    <section class="chat-vessel">
       <div ref="stream" class="message-stream" aria-live="polite">
         <div v-if="!messages.length" class="welcome-block">
-          <p>售后服务通道。可咨询订单物流、退换政策与设备排障。</p>
+          <div class="welcome-badge" aria-hidden="true"><span></span></div>
+          <h1>从一个客户问题开始</h1>
+          <p class="welcome-subtitle">下面的快捷问题只是起点，你也可以直接输入自己的测试用例。</p>
           <div class="quick-prompts" aria-label="常用问题">
-            <button v-for="prompt in quickPrompts" :key="prompt" class="chip-button" type="button" @click="submit(prompt)">
-              {{ prompt }}
-            </button>
+            <button v-for="prompt in quickPrompts" :key="prompt" class="chip-button" type="button" @click="submit(prompt)">{{ prompt }}</button>
           </div>
         </div>
 
@@ -157,11 +141,11 @@ watch(messages, async () => {
             <div v-if="message.role === 'assistant'" class="message-content markdown-content" v-html="renderMarkdown(message.content)"></div>
             <div v-else class="message-content">{{ message.content }}</div>
             <div v-if="message.role === 'assistant'" class="message-meta">
-              节点: {{ message.metadata?.agent_type || '未知' }}　耗时: {{ formatLatency(message.metadata?.latency_ms) }}ms　知识库: {{ message.metadata?.knowledge_used ? '已引用' : '无' }}
+              节点: {{ message.metadata?.agent_type || '未知' }} · 耗时: {{ formatLatency(message.metadata?.latency_ms) }}ms · 知识库: {{ message.metadata?.knowledge_used ? '已引用' : '无' }}
             </div>
           </div>
           <div v-if="message.role === 'assistant' && (message.metadata?.escalated || message.metadata?.agent_recommended_handoff)" class="handoff-card">
-            {{ message.metadata.intent === 'refund' || message.metadata.intent === 'payment_issue' ? '当前涉及退款与账单核验，建议转人工客服处理。' : message.metadata.intent === 'account_security' ? '当前涉及账号与资金安全，建议转人工客服处理。' : message.metadata.intent === 'technical_crash' ? '当前涉及系统异常报错，建议转人工客服处理。' : message.metadata.intent === 'complaint' ? '当前涉及服务投诉与纠纷，建议转人工客服处理。' : '当前问题较为复杂，建议转人工客服处理。' }}
+            提示：当前诉求涉及人工复核，建议转接人工坐席处理。
           </div>
         </article>
 
@@ -172,7 +156,10 @@ watch(messages, async () => {
       <form class="composer" @submit.prevent="submit()">
         <label class="sr-only" for="chat-input">输入售后问题</label>
         <textarea id="chat-input" v-model="input" rows="2" placeholder="输入你的售后问题" @keydown="onKeydown"></textarea>
-        <button class="primary-button" type="submit" :disabled="sending || !input.trim()">发送</button>
+        <div class="composer-footer">
+          <span class="composer-hint">⌘ / Ctrl + Enter 发送</span>
+          <button class="primary-button send-button" type="submit" :disabled="sending || !input.trim()">发送</button>
+        </div>
       </form>
     </section>
   </section>

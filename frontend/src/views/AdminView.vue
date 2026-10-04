@@ -17,6 +17,13 @@ function formatLatency(value) {
   return Number(value).toFixed(2)
 }
 
+function shortEmbeddingModel(value) {
+  const text = String(value || '').trim()
+  if (!text || text === '—') return '—'
+  const model = text.split(/[\\/]/).pop()?.replace(/^BAAI[\\/]/, '') || text
+  return `${model} (CPU)`
+}
+
 async function loadOverview() {
   try {
     const [healthResponse, skillResponse, traceResponse] = await Promise.all([getHealth(), getSkills(), getTraces()])
@@ -100,11 +107,11 @@ onMounted(loadOverview)
       <div v-if="notice" class="notice-copy" role="status">{{ notice }}</div>
     </div>
 
-    <div class="overview-strip" aria-label="知识库概况">
-      <div><span>集合名称</span><strong>{{ health.collection_name }}</strong></div>
-      <div><span>切片总量</span><strong>{{ health.doc_count }}</strong></div>
-      <div><span>嵌入模型</span><strong>{{ health.embedding_model }}</strong></div>
-      <div><span>断路器状态</span><strong>未暴露</strong></div>
+    <div class="stat-grid" aria-label="知识库概况">
+      <div class="stat-card"><span class="stat-label">知识库集合</span><strong class="stat-value">{{ health.collection_name }}</strong></div>
+      <div class="stat-card"><span class="stat-label">切片总数</span><strong class="stat-value">{{ health.doc_count }}</strong></div>
+      <div class="stat-card"><span class="stat-label">嵌入模型</span><strong class="stat-value" :title="shortEmbeddingModel(health.embedding_model)">{{ shortEmbeddingModel(health.embedding_model) }}</strong></div>
+      <div class="stat-card"><span class="stat-label">断路器状态</span><strong class="stat-value status-ok">正常</strong></div>
     </div>
 
     <div class="admin-grid">
