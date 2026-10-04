@@ -6,13 +6,348 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+import logging
+import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
 from pydantic import BaseModel, Field, field_validator
 
+from agents.agent_orchestrator import (
+    AgentOrchestrator,
+    AgentType,
+    BillingAgent,
+    EscalationAgent,
+    GeneralAgent,
+    TechnicalAgent,
+)
+from core.intent_recognizer import recognize_intent
+from mcp.knowledge_base import KnowledgeBase
+from mcp.tool_manager import MCPToolManager, Tool
+from memory.conversation_memory import MemoryManager
 
-app = FastAPI(title="ShopCare", version="0.1.0")
+
+logger = logging.getLogger(__name__)
+
+
+class IntentRecognizer:
+    """为 API 生命周期提供意图识别函数的轻量适配器。
+
+    Args:
+        model: 可选的 Anthropic 模型名；实际识别函数仍遵循核心模块的注入边界。
+
+    Returns:
+        无；实例通过 ``recognize`` 暴露异步识别入口。
+    """
+
+    def __init__(self, model: Optional[str] = None) -> None:
+        self.model = model
+
+    async def recognize(self, message: str, history: Any = None) -> Any:
+        """调用核心三路意图识别，不在 API 层复制识别算法。
+
+        Args:
+            message: 待识别的用户消息。
+            history: 可选历史，仅由核心识别器决定是否使用。
+
+        Returns:
+            核心模块返回的 ``IntentResult`` dataclass。
+        """
+
+        return await recognize_intent(message, history=history)
+
+
+class SkillManager:
+    """扫描本地技能目录的生命周期占位组件，不连接外部服务。
+
+    Args:
+        skills_dir: 本地技能目录；目录不存在时视为空目录。
+
+    Returns:
+        无；实例仅保存本地路径和可发现的技能名称。
+    """
+
+    def __init__(self, skills_dir: str = "skills") -> None:
+        self.skills_dir = Path(skills_dir)
+        self.skills: List[str] = (
+            sorted(path.stem for path in self.skills_dir.glob("*.md"))
+            if self.skills_dir.is_dir()
+            else []
+        )
+
+    async def close(self) -> None:
+        """释放技能扫描器资源；当前扫描为本地只读操作，无需额外动作。"""
+
+
+class PerformanceMonitor:
+    """保存生命周期级监控配置的轻量组件。
+
+    详细 Prometheus 与 Z-score 逻辑留给 Step 8，启动阶段不产生外部调用。
+    """
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        """标记监控组件关闭，保持关闭操作可重复执行。"""
+
+        self.closed = True
+
+
+class EndToEndEvaluator:
+    """保存评测运行配置的轻量组件。
+
+    100 条基准评测流水线留待 Step 9；此处只完成全局依赖装配。
+    """
+
+    def __init__(self, dataset_path: Optional[str] = None) -> None:
+        self.dataset_path = dataset_path
+
+    async def close(self) -> None:
+        """评测组件当前无外部资源，保留统一生命周期接口。"""
+
+
+def _read_settings() -> Dict[str, str]:
+    """读取生命周期所需环境变量并返回不含派生状态的配置快照。
+
+    Returns:
+        配置键到字符串值的映射；敏感值只保存在内存，不写入日志。
+    """
+
+    defaults = {
+        "ANTHROPIC_API_KEY": "",
+        "ANTHROPIC_MODEL": "claude-3-5-sonnet-20241022",
+        "ANTHROPIC_BASE_URL": "",
+        "REDIS_URL": "redis://localhost:6379/0",
+        "CHROMA_HOST": "localhost",
+        "CHROMA_PORT": "8000",
+        "CHROMA_PERSIST_DIRECTORY": ".data/chroma",
+        "CUSTOMEROPS_KB_COLLECTION": "knowledge_base_zh",
+        "CUSTOMEROPS_EMBEDDING_MODEL": "BAAI/bge-small-zh-v1.5",
+        "SKILLS_DIR": "skills",
+        "EVALUATION_DATASET": "evaluation/datasets/golden_benchmark_v2.1_100.json",
+    }
+    return {key: os.getenv(key, default) for key, default in defaults.items()}
+
+
+def _create_redis_client(redis_url: str) -> Any:
+    """创建异步 Redis 客户端；不在启动阶段主动 ping 外部服务。
+
+    Args:
+        redis_url: Redis 连接 URL。
+
+    Returns:
+        配置好的异步 Redis 客户端。
+
+    Raises:
+        RuntimeError: Redis SDK 不可用时抛出明确错误。
+    """
+
+    try:
+        import redis.asyncio as redis
+    except Exception as exc:  # pragma: no cover - 依赖环境决定
+        raise RuntimeError(f"Redis SDK 不可用: {exc}") from exc
+    return redis.from_url(redis_url, decode_responses=True)
+
+
+def _create_anthropic_client(settings: Dict[str, str]) -> Any:
+    """仅在配置 API key 时构造 Anthropic 异步客户端。
+
+    Args:
+        settings: 生命周期配置快照。
+
+    Returns:
+        ``AsyncAnthropic`` 客户端；未配置 key 时返回 ``None``。
+    """
+
+    api_key = settings.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        # Why：允许离线启动并使用确定性降级，避免把缺失凭证变成白屏启动故障。
+        logger.warning("未设置 ANTHROPIC_API_KEY，LLM 能力将使用安全降级路径")
+        return None
+    try:
+        import anthropic
+
+        kwargs: Dict[str, Any] = {"api_key": api_key}
+        if settings.get("ANTHROPIC_BASE_URL"):
+            kwargs["base_url"] = settings["ANTHROPIC_BASE_URL"]
+        return anthropic.AsyncAnthropic(**kwargs)
+    except Exception as exc:  # pragma: no cover - SDK 安装环境决定
+        logger.warning("Anthropic 客户端初始化失败，将使用安全降级：%s", exc)
+        return None
+
+
+async def _knowledge_handler(params: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Any:
+    """为已装配的知识库工具执行一次只读检索。
+
+    Args:
+        params: 包含 query 与可选 top_k 的工具参数。
+        context: 工具调用上下文；当前只读 handler 不修改该上下文。
+
+    Returns:
+        知识库切片列表；知识库不可用时由 ToolManager fallback 处理。
+    """
+
+    knowledge_base = getattr(app.state, "knowledge_base", None)
+    if knowledge_base is None:
+        raise RuntimeError("KnowledgeBase 尚未装配")
+    query = str(params.get("query", ""))
+    top_k = int(params.get("top_k", 5))
+    return await asyncio.to_thread(knowledge_base.search, query, top_k)
+
+
+async def _knowledge_fallback(
+    params: Dict[str, Any],
+    context: Optional[Dict[str, Any]],
+    error: str,
+) -> Dict[str, Any]:
+    """返回明确的知识库不可用说明，不伪造检索结果。"""
+
+    return {"available": False, "message": "知识库暂不可用，请稍后重试"}
+
+
+def _register_knowledge_tools(manager: MCPToolManager) -> None:
+    """注册 Step7.1 的知识检索工具及兼容别名。
+
+    Args:
+        manager: 已初始化的工具治理管理器。
+
+    Returns:
+        无；注册后的工具由 ``app.state.tool_manager`` 持有。
+    """
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "top_k": {"type": "integer", "minimum": 1},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    }
+    for name in ("knowledge_search", "search_knowledge_base"):
+        tool = Tool(
+            name=name,
+            description="只读检索 ShopCare 产品知识库，不执行任何外部业务写操作。",
+            schema=schema,
+            handler=_knowledge_handler,
+            fallback=_knowledge_fallback,
+            cache_ttl=300,
+            timeout=30.0,
+        )
+        # Why：rerank 能力由 Step4.4 的工具治理协议标记，TTL 300 秒减少重复召回压力。
+        tool.supports_rerank = True
+        manager.register(tool)
+
+
+async def _close_resource(resource: Any) -> None:
+    """尽力关闭异步或同步资源，隔离关闭阶段异常。"""
+
+    if resource is None:
+        return
+    try:
+        close = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+        if callable(close):
+            result = close()
+            if hasattr(result, "__await__"):
+                await result
+    except Exception as exc:  # pragma: no cover - 仅在依赖关闭异常时触发
+        logger.warning("生命周期资源关闭失败：%s", exc)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """初始化并释放 ShopCare 全局组件。
+
+    Args:
+        app: 当前 FastAPI 应用实例。
+
+    Yields:
+        ``None``；yield 期间应用可安全访问 ``app.state`` 中的组件。
+
+    说明：启动阶段只创建本地客户端与只读知识组件，不访问订单、支付、工单或人工坐席系统。
+    """
+
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except Exception as exc:  # pragma: no cover - python-dotenv 可选安装差异
+        logger.warning(".env 加载失败，继续使用系统环境变量：%s", exc)
+
+    settings = _read_settings()
+    redis_client = _create_redis_client(settings["REDIS_URL"])
+    anthropic_client = _create_anthropic_client(settings)
+    knowledge_base = KnowledgeBase(
+        chroma_host=settings["CHROMA_HOST"],
+        chroma_port=int(settings["CHROMA_PORT"]),
+        chroma_path=settings["CHROMA_PERSIST_DIRECTORY"],
+        embedding_model=settings["CUSTOMEROPS_EMBEDDING_MODEL"],
+        collection_name=settings["CUSTOMEROPS_KB_COLLECTION"],
+    )
+    tool_manager = MCPToolManager(
+        api_key=settings["ANTHROPIC_API_KEY"] or None,
+        model=settings["ANTHROPIC_MODEL"],
+        client=anthropic_client,
+    )
+    app.state.knowledge_base = knowledge_base
+    _register_knowledge_tools(tool_manager)
+    memory_manager = MemoryManager(
+        redis_client=redis_client,
+        redis_url=settings["REDIS_URL"],
+        llm_client=anthropic_client,
+        chroma_client=getattr(knowledge_base, "_client", None),
+        model=settings["ANTHROPIC_MODEL"],
+    )
+    intent_recognizer = IntentRecognizer(model=settings["ANTHROPIC_MODEL"])
+    agents = {
+        "general": GeneralAgent(client=anthropic_client),
+        "technical": TechnicalAgent(client=anthropic_client),
+        "billing": BillingAgent(client=anthropic_client),
+        "escalation": EscalationAgent(client=anthropic_client),
+    }
+    typed_agents = {
+        AgentType.GENERAL: agents["general"],
+        AgentType.TECHNICAL: agents["technical"],
+        AgentType.BILLING: agents["billing"],
+        AgentType.ESCALATION: agents["escalation"],
+    }
+    orchestrator = AgentOrchestrator(
+        agent_pool=typed_agents,
+        knowledge_search=knowledge_base,
+    )
+    skill_manager = SkillManager(settings["SKILLS_DIR"])
+    performance_monitor = PerformanceMonitor()
+    evaluator = EndToEndEvaluator(settings["EVALUATION_DATASET"])
+
+    app.state.settings = settings
+    app.state.redis_client = redis_client
+    app.state.anthropic_client = anthropic_client
+    app.state.tool_manager = tool_manager
+    app.state.memory_manager = memory_manager
+    app.state.intent_recognizer = intent_recognizer
+    app.state.agents = agents
+    app.state.agent_pool = typed_agents
+    app.state.agent_orchestrator = orchestrator
+    app.state.skill_manager = skill_manager
+    app.state.performance_monitor = performance_monitor
+    app.state.evaluator = evaluator
+    app.state.ready = True
+    try:
+        yield
+    finally:
+        app.state.ready = False
+        await _close_resource(performance_monitor)
+        await _close_resource(skill_manager)
+        await _close_resource(anthropic_client)
+        await _close_resource(getattr(knowledge_base, "_client", None))
+        await _close_resource(redis_client)
+
+
+app = FastAPI(title="ShopCare", version="0.1.0", lifespan=lifespan)
 
 
 class ChatRequest(BaseModel):

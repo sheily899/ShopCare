@@ -256,3 +256,20 @@ Step 5.3 只提供结构化上下文快照，不执行任何真实工单、订�
 合成默认使用 `temperature=0.1`、`max_tokens=1000`，可由 `CUSTOMEROPS_COMPOSER_TEMPERATURE` 和 `CUSTOMEROPS_COMPOSER_MAX_TOKENS` 覆盖。合成 Prompt 只允许输出中文客户段落，要求以主结论为主体、去除重复寒暄、平滑冲突，并禁止编造订单、退款或后台查询结果。合成器不执行任何外部业务写操作，也不引入 Cross-Encoder 或其他新依赖。
 
 验证：Step 6.3 专项 `5 passed`；Agent/Fan-out 回归 `9 passed`；全量 pytest `146 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+## Step 7.1：FastAPI Lifespan 生命周期与全局组件装配
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `api/main.py` | 以现代 FastAPI `lifespan` 管理应用级依赖。启动时读取 `.env`/环境变量，构造 Redis 与可选 Anthropic 客户端，初始化 `KnowledgeBase`、`MCPToolManager`、`MemoryManager`、`IntentRecognizer`、四类领域 Agent、`AgentOrchestrator`、`SkillManager`、`PerformanceMonitor` 和 `EndToEndEvaluator`，并统一挂载至 `app.state`。 |
+| `tests/test_api_lifespan.py` | 使用离线 fake Redis/KnowledgeBase 验证 TestClient 生命周期、核心状态装配、`knowledge_search` 工具注册、缺少 API key 的明确告警和资源关闭。 |
+
+### 生命周期边界
+
+- `KnowledgeBase` 继续负责 HTTP Chroma 优先与本地持久化 fallback；API 层只传递环境配置，不复制连接策略。
+- `knowledge_search` 与兼容的 `search_knowledge_base` 均为只读工具，`cache_ttl=300`、`supports_rerank=True`，fallback 仅返回不可用说明，不伪造业务结果。
+- `ANTHROPIC_API_KEY` 缺失时只记录 warning 并让应用进入安全降级状态；有 key 时才构造 Anthropic 客户端，启动阶段不主动调用模型。
+- Redis 客户端仅创建连接对象，不在 lifespan 启动时执行 ping；退出阶段统一调用 `aclose`/`close` 并隔离关闭异常。
+- 当前 `PerformanceMonitor`、`EndToEndEvaluator` 和 `SkillManager` 是为生命周期装配提供的轻量组件；详细监控、评测流水线与 `/skills` 路由仍属于后续 Step 7.3/Step 8/Step 9。
+- API 层不向订单、支付、退款、工单或人工坐席系统发起网络调用；Step 7.2 的 `/health`、`/chat` 和记忆回写尚未实现。
+
+验证：Step 7.1 专项 `3 passed`；全量 pytest `149 passed`；`compileall api tests` 与 `git diff --check` 通过。

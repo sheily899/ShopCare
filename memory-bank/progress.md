@@ -261,3 +261,13 @@
 - [x] 全盘失败固定安全文案和局部异常隔离通过。
 - [x] `OrchestratorResult` 完整装配合成文本、路由、Agent、工具、Trace 与检索诊断元数据。
 - [x] `progress.md` 与 `architecture.md` 已同步。
+
+## Step 7.1：FastAPI Lifespan 生命周期与全局组件装配
+
+- 状态：已完成，等待人工确认后再进入 Step 7.2。
+- 修改：扩展 `api/main.py`，新增现代 FastAPI `lifespan` 上下文管理器、环境配置快照、Redis/Anthropic 客户端工厂、KnowledgeBase 与 MemoryManager 注入、IntentRecognizer 适配器、四类 Agent 池、AgentOrchestrator、SkillManager、PerformanceMonitor 与 EndToEndEvaluator 状态装配；新增 `tests/test_api_lifespan.py`。
+- 知识工具：注册 `knowledge_search` 及兼容的 `search_knowledge_base` 只读工具，`cache_ttl=300`、`supports_rerank=True`，异常 fallback 明确返回知识库不可用，不伪造业务结果。
+- 生命周期：启动阶段读取 `.env`/环境变量并保存到 `app.state.settings`；缺少 `ANTHROPIC_API_KEY` 时记录警告并保留安全降级；退出时关闭可用异步资源并隔离关闭异常。
+- 安全边界：启动阶段不访问订单、支付、退款、工单或人工坐席系统；当前 PerformanceMonitor 与 EndToEndEvaluator 仅完成生命周期装配，详细监控与评测流水线分别留待 Step 8、Step 9。
+- 验证：`.venv\Scripts\python.exe -m pytest tests/test_api_lifespan.py -q` → `3 passed`；全量 pytest → `149 passed`；`compileall api tests` 与 `git diff --check` 通过。
+- 边界：未实现 `/health`、`/chat`、记忆回写与支持性 API 路由；Step 7.2 未开始。
