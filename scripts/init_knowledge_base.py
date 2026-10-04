@@ -18,8 +18,10 @@ from typing import Any, Dict, List, Sequence
 
 logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+ROOT_STRING = str(ROOT)
+if ROOT_STRING in sys.path:
+    sys.path.remove(ROOT_STRING)
+sys.path.insert(0, ROOT_STRING)
 
 from mcp.knowledge_base import DEFAULT_COLLECTION_NAME, KnowledgeBase
 

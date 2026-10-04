@@ -123,6 +123,7 @@ Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 尚未开始�
 | 文件 | 职责 |
 | --- | --- |
 | `mcp/knowledge_base.py` | 按 Markdown `##`/`###` 标题优先拆分，在每片正文前注入标题面包屑；对超长小节按段落、句号和硬截断拆分，并以 `{source_document_id}_chunk_{chunk_index}` 生成稳定片段身份。 |
+| `mcp/__init__.py` | 将本地 MCP/RAG 目录声明为明确 Python 包，避免直接执行初始化脚本时被环境中的同名第三方 `mcp` 包覆盖。 |
 | `scripts/init_knowledge_base.py` | 复用带标题上下文的切片器，校验七项 metadata、统计最大 chunk 长度，并输出文档数、chunk 数和耗时。 |
 | `tests/test_knowledge_base_chunking.py` | 验证六篇文档生成 16–22 个 chunk、面包屑、500 字符上限、metadata 完整性及 401 专属片段召回。 |
 

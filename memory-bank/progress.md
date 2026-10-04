@@ -131,5 +131,6 @@
 - 检索：返回 `title`、`content`、`score`、`id` 与稳定 chunk 身份；`score=round(1-distance,4)`，不设置 score threshold，也不将 score 解释为概率。
 - 源文本：仅落位 6 篇产品客服 Markdown；未复制老工程 `data/chroma` 二进制，也未混入 `knowledge_base_benchmark_v2.1_main100.json`。
 - 入库：`python scripts/init_knowledge_base.py` 扫描 `data/knowledge/*.md`，默认写入项目 `.data/chroma` 的产品 collection，并输出文档数、chunk 数和耗时。
+- 启动兼容：新增 `mcp/__init__.py` 并固定脚本将项目根目录置于 `sys.path` 首位，避免系统同名第三方 `mcp` 包导致 `ModuleNotFoundError`。
 - 验证：知识库专项测试 → `11 passed`；Header-Aware 专项断言六篇文档生成 18 个 chunk、最大 244 字符并聚焦 401 片段；全量 pytest → `88 passed`；脚本 `--help`、compileall 与 `git diff --check` 通过。
 - 边界：未实现 ToolManager、缓存、CircuitBreaker、Query Rewrite、并行召回或 Rerank；下一步等待进入 Step 4.2。
