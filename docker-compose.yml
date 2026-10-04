@@ -77,7 +77,8 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "80:80"
+      # Windows 常见 HTTP.sys 会占用宿主机 80；容器内仍固定监听 80，宿主端口可按环境覆盖。
+      - "${SHOPCARE_FRONTEND_PORT:-8080}:80"
     networks:
       - shopcare-net
 
