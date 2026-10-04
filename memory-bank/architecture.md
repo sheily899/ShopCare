@@ -128,3 +128,12 @@ Step 4.1 已完成；Step 4.2 的 Tool、缓存与 CircuitBreaker 尚未开始�
 | `tests/test_knowledge_base_chunking.py` | 验证六篇文档生成 16–22 个 chunk、面包屑、500 字符上限、metadata 完整性及 401 专属片段召回。 |
 
 本次升级实测六篇源文档生成 18 个 chunk，最大长度 244 字符；Step 4.2 的 ToolManager/CircuitBreaker 仍未开始。
+
+### Step 4.1 回归修复：Chroma 本地 fallback 设置隔离
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `mcp/knowledge_base.py` | HTTP `HttpClient` 失败后重新创建独立的本地 Settings，并明确固定 `chromadb.api.segment.SegmentAPI`；不再复用会被 HTTP 客户端原地改写为 FastAPI 的 Settings，确保 `PersistentClient` 真正访问本地持久化目录。 |
+| `tests/test_knowledge_base_embedding.py` | 模拟真实 `HttpClient` 对 Settings 的原地污染，并断言 fallback 使用 SegmentAPI 配置，防止 404 后再次走 HTTP。 |
+
+验证：全量 pytest `88 passed`；真实 Chroma 0.5.23 在 `localhost:8000` 返回 404 时可成功创建本地 `PersistentClient`。

@@ -52,11 +52,16 @@ def test_http_failure_falls_back_to_persistent_client_and_logs(monkeypatch, capl
     class FakeHttpClient:
         def __init__(self, **kwargs):
             calls["http"] = kwargs
+            # 模拟真实 Chroma HttpClient 对 Settings 的原地 FastAPI 改写。
+            kwargs["settings"]["chroma_api_impl"] = "chromadb.api.fastapi.FastAPI"
             raise ConnectionError("http unavailable")
 
     class FakePersistentClient:
         def __init__(self, **kwargs):
             calls["persistent"] = kwargs
+            assert kwargs["settings"]["chroma_api_impl"] == (
+                "chromadb.api.segment.SegmentAPI"
+            )
 
         def get_or_create_collection(self, **kwargs):
             calls["collection"] = kwargs

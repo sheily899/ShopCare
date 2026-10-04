@@ -69,6 +69,42 @@ def _chroma_settings(module: Any) -> Any:
         return settings_cls()
 
 
+def _persistent_chroma_settings(module: Any) -> Any:
+    """为本地持久化客户端创建独立且明确的 Chroma 设置。
+
+    ``chromadb.HttpClient`` 会原地修改传入 Settings 的 ``chroma_api_impl``。
+    因此本地 fallback 必须重新创建 Settings，并固定为 SegmentAPI，避免把
+    HTTP 配置带入 ``PersistentClient`` 后再次请求远端服务。
+
+    Args:
+        module: 已加载的 ChromaDB 模块或测试替身。
+
+    Returns:
+        供 ``PersistentClient`` 使用的独立 Settings 实例；SDK 不支持 Settings
+        时返回 ``None``。
+    """
+    settings = _chroma_settings(module)
+    if settings is None:
+        return None
+
+    # Why：本地 fallback 必须走 SegmentAPI，不能复用 HTTP 客户端污染过的 FastAPI 配置。
+    try:
+        settings.chroma_api_impl = "chromadb.api.segment.SegmentAPI"
+    except (AttributeError, TypeError):
+        # 测试替身可能使用不可变或字典式 Settings；构造参数是第二条兼容路径。
+        settings_cls = getattr(module, "Settings", None)
+        if settings_cls is None:
+            return settings
+        try:
+            return settings_cls(
+                anonymized_telemetry=False,
+                chroma_api_impl="chromadb.api.segment.SegmentAPI",
+            )
+        except TypeError:
+            return settings
+    return settings
+
+
 def build_embedding_function(model_name: str = DEFAULT_EMBEDDING_MODEL) -> Any:
     """构建固定 CPU、归一化的 BGE SentenceTransformer embedding function。
 
@@ -204,9 +240,12 @@ class KnowledgeBase:
                 self.chroma_path,
                 exc,
             )
+        # Why：HTTP Settings 会被 HttpClient 原地改写为 FastAPI；fallback 必须使用
+        # 全新本地 Settings，才能真正落盘而不是再次访问失败的 HTTP 端点。
+        persistent_settings = _persistent_chroma_settings(module)
         persistent_kwargs: Dict[str, Any] = {"path": self.chroma_path}
-        if settings is not None:
-            persistent_kwargs["settings"] = settings
+        if persistent_settings is not None:
+            persistent_kwargs["settings"] = persistent_settings
         try:
             return module.PersistentClient(**persistent_kwargs)
         except Exception as exc:

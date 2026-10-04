@@ -133,4 +133,5 @@
 - 入库：`python scripts/init_knowledge_base.py` 扫描 `data/knowledge/*.md`，默认写入项目 `.data/chroma` 的产品 collection，并输出文档数、chunk 数和耗时。
 - 启动兼容：新增 `mcp/__init__.py` 并固定脚本将项目根目录置于 `sys.path` 首位，避免系统同名第三方 `mcp` 包导致 `ModuleNotFoundError`。
 - 验证：知识库专项测试 → `11 passed`；Header-Aware 专项断言六篇文档生成 18 个 chunk、最大 244 字符并聚焦 401 片段；全量 pytest → `88 passed`；脚本 `--help`、compileall 与 `git diff --check` 通过。
+- 回归修复：HTTP Chroma 失败后的 PersistentClient fallback 改为使用独立的 `SegmentAPI` Settings，避免复用被 `HttpClient` 原地改写的 FastAPI 配置；真实 0.5.23 客户端已验证可从 `localhost:8000` 的 404 回退到本地目录。
 - 边界：未实现 ToolManager、缓存、CircuitBreaker、Query Rewrite、并行召回或 Rerank；下一步等待进入 Step 4.2。
