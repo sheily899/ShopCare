@@ -195,3 +195,13 @@
 - 安全边界：所有工具均为内存只读计算，不读取后台日志、不调用订单/支付接口、不确认退款，也不推断重复扣款等法律结论；所有工具 schema 均显式 `type=object` 与 `additionalProperties=false`。
 - 验证：Step 5.2 专项 `.venv\Scripts\python.exe -m pytest -q tests/test_agent_tools_domain.py` → `9 passed`；Step 5.1/5.2 回归 → `14 passed`；全量 pytest → `123 passed`；`compileall agents tests` 与 `git diff --check` 通过。
 - 边界：未实现 Escalation 工具、Agent profile 和真实业务写操作；Step 5.3 未开始。
+
+## Step 5.3：Escalation 人工交接工具与安全红线
+
+- 状态：已完成，等待人工确认后再进入 Step 5.4。
+- 修改：扩展 `agents/tools.py`，新增 `create_handoff_summary`、严格 Anthropic schema 和 `escalation_tools()` 注册表；新增 `tests/test_agent_tools_escalation.py`。
+- 交接契约：生成 8 位 `request_id`，返回 `reason`、`urgency`、脱敏后的 `entities`、`context_summary`、`handoff_status` 与升级建议文本；`urgency` 严格限制为 1–4 的整数。
+- 安全边界：固定返回 `sensitive_data_required=False` 与 `external_ticket_created=False`；递归过滤 `password`、`verification_code`、`full_card_number` 等禁止字段及敏感提示词；不调用 JIRA、工单、订单、支付或人工坐席 API，不声称人工已接手。
+- 异常：非法入参统一返回结构化安全错误，仍保留敏感数据禁止和无外部工单标志。
+- 验证：Step 5.3 专项 `4 passed`；Step 5.1–5.3 回归 `18 passed`；全量 pytest `127 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+- 边界：未实现 Agent profile、编排器和真实人工系统接入；Step 5.4 未开始。

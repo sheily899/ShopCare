@@ -200,3 +200,14 @@ Rerank 只消费 Step 4.3 已完成去重的候选列表，不引入 Cross-Encod
 本阶段不读取真实服务端日志、不调用订单或支付系统、不确认退款，也不对重复扣款作法律定性；Escalation 工具和 Agent profile 留待后续步骤。
 
 验证：Step 5.2 专项测试 `9 passed`；Step 5.1/5.2 回归 `14 passed`；全量 pytest `123 passed`；`compileall agents tests` 与 `git diff --check` 通过。
+
+## Step 5.3：Escalation 人工交接工具与安全边界
+
+| 文件 | 职责变化 |
+| --- | --- |
+| `agents/tools.py` | 新增 `create_handoff_summary` 及其严格 object schema，生成 8 位 request_id、reason、urgency、脱敏实体和上下文摘要；通过 `sensitive_data_required=False`、`external_ticket_created=False` 与 `handoff_status=recommended` 明确这是会话内升级建议，不是工单创建或人工已接入。递归过滤禁止的 password、verification_code、full_card_number 字段和敏感提示词，非法入参走结构化错误路径。 |
+| `tests/test_agent_tools_escalation.py` | 验证交接摘要字段、8 位 request_id、敏感数据标志、禁止字段过滤、非法入参安全返回、无外部网络副作用及 Escalation schema 注册。 |
+
+Step 5.3 只提供结构化上下文快照，不执行任何真实工单、订单、支付、退款或人工坐席写操作；Step 5.4 的 Agent profile 与编排逻辑尚未开始。
+
+验证：专项测试 `4 passed`；Step 5.1–5.3 回归 `18 passed`；全量 pytest `127 passed`；`compileall agents tests` 与 `git diff --check` 通过。

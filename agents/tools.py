@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import inspect
 import math
+import re
+import uuid
 from numbers import Real
 from typing import Any, Callable, Dict, Mapping, Optional
 
@@ -575,4 +577,127 @@ def billing_tools() -> Dict[str, AgentToolSpec]:
     """
 
     return dict(BILLING_TOOLS)
+
+
+# 这些字段属于交接摘要的禁止采集范围；过滤发生在输出边界，避免敏感值进入摘要。
+_FORBIDDEN_SENSITIVE_FIELDS = frozenset(
+    {"password", "verification_code", "full_card_number"}
+)
+_SENSITIVE_TEXT_PATTERN = re.compile(
+    r"password|verification_code|full_card_number|密码|短信验证码|验证码|银行卡号",
+    flags=re.IGNORECASE,
+)
+
+
+def _sanitize_handoff_text(value: str) -> str:
+    """移除交接文本中的敏感凭证提示词。"""
+
+    return _SENSITIVE_TEXT_PATTERN.sub("[已脱敏字段]", value)
+
+
+def _sanitize_handoff_value(value: Any) -> Any:
+    """递归清理交接实体中的敏感字段与文本。"""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _sanitize_handoff_value(item)
+            for key, item in value.items()
+            if str(key).strip().lower() not in _FORBIDDEN_SENSITIVE_FIELDS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_handoff_value(item) for item in value]
+    if isinstance(value, str):
+        return _sanitize_handoff_text(value)
+    return value
+
+
+def _handoff_error(message: str) -> Dict[str, Any]:
+    """构造不创建工单且不要求敏感数据的安全错误结果。"""
+
+    return {
+        "success": False,
+        "error": message,
+        "sensitive_data_required": False,
+        "external_ticket_created": False,
+    }
+
+
+async def create_handoff_summary(params: Any) -> Dict[str, Any]:
+    """生成仅供当前会话使用的人工交接摘要与升级建议。
+
+    Args:
+        params: 工具参数对象，包含 ``reason``、``urgency``，以及可选的
+            ``entities`` 和 ``context_summary``。
+
+    Returns:
+        标准化的交接摘要字典。该结果只表示升级建议，不代表人工已接入，
+        且不会创建外部工单或收集密码、验证码、完整银行卡号。
+    """
+
+    if not isinstance(params, Mapping):
+        return _handoff_error("工具参数必须是对象")
+
+    reason = params.get("reason")
+    urgency = params.get("urgency")
+    entities = params.get("entities")
+    context_summary = params.get("context_summary")
+
+    if not isinstance(reason, str) or not reason.strip():
+        return _handoff_error("reason 必须是非空字符串")
+    # 紧急度固定在 1-4，便于下游按既定等级处理而不引入隐式转换。
+    if isinstance(urgency, bool) or not isinstance(urgency, int) or not 1 <= urgency <= 4:
+        return _handoff_error("urgency 必须是 1 到 4 的整数")
+    if entities is not None and not isinstance(entities, Mapping):
+        return _handoff_error("entities 必须是对象")
+    if context_summary is not None and not isinstance(context_summary, str):
+        return _handoff_error("context_summary 必须是字符串")
+
+    return {
+        "success": True,
+        "request_id": uuid.uuid4().hex[:8],
+        "reason": _sanitize_handoff_text(reason.strip()),
+        "urgency": urgency,
+        "entities": _sanitize_handoff_value(dict(entities or {})),
+        "context_summary": _sanitize_handoff_text(context_summary.strip())
+        if isinstance(context_summary, str)
+        else "",
+        "sensitive_data_required": False,
+        "external_ticket_created": False,
+        "handoff_status": "recommended",
+        "handoff_message": "已生成交接摘要与升级建议，等待后续人工流程处理。",
+    }
+
+
+CREATE_HANDOFF_SUMMARY_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "reason": {"type": "string"},
+        "urgency": {"type": "integer", "minimum": 1, "maximum": 4},
+        "entities": {"type": "object"},
+        "context_summary": {"type": "string"},
+    },
+    "required": ["reason", "urgency"],
+    "additionalProperties": False,
+}
+
+CREATE_HANDOFF_SUMMARY_TOOL = make_tool(
+    "create_handoff_summary",
+    "生成不创建外部工单的人工交接摘要与升级建议。",
+    CREATE_HANDOFF_SUMMARY_SCHEMA,
+    create_handoff_summary,
+)
+
+ESCALATION_TOOLS: Dict[str, AgentToolSpec] = {
+    CREATE_HANDOFF_SUMMARY_TOOL.name: CREATE_HANDOFF_SUMMARY_TOOL,
+}
+
+
+def escalation_tools() -> Dict[str, AgentToolSpec]:
+    """返回 Escalation 人工交接工具注册表的浅拷贝。
+
+    Returns:
+        以工具名为 key 的 Escalation 工具字典。
+    """
+
+    return dict(ESCALATION_TOOLS)
 
