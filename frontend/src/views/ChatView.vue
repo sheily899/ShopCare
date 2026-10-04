@@ -43,6 +43,11 @@ function formatTime(value) {
   return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value))
 }
 
+function formatLatency(value) {
+  if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) return '—'
+  return Number(value).toFixed(2)
+}
+
 const sessions = ref(readSessions())
 if (!sessions.value.length) sessions.value = [createSession()]
 const activeId = ref(sessions.value[0].id)
@@ -152,7 +157,7 @@ watch(messages, async () => {
             <div v-if="message.role === 'assistant'" class="message-content markdown-content" v-html="renderMarkdown(message.content)"></div>
             <div v-else class="message-content">{{ message.content }}</div>
             <div v-if="message.role === 'assistant'" class="message-meta">
-              节点: {{ message.metadata?.agent_type || '未知' }}　耗时: {{ message.metadata?.latency_ms ?? '—' }}ms　知识库: {{ message.metadata?.knowledge_used ? '已引用' : '无' }}
+              节点: {{ message.metadata?.agent_type || '未知' }}　耗时: {{ formatLatency(message.metadata?.latency_ms) }}ms　知识库: {{ message.metadata?.knowledge_used ? '已引用' : '无' }}
             </div>
           </div>
           <div v-if="message.role === 'assistant' && (message.metadata?.escalated || message.metadata?.agent_recommended_handoff)" class="handoff-card">

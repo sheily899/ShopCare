@@ -307,6 +307,11 @@
 - 视觉边界：画布 CREMA、强调 TOMATO、提示 PEAR；辅助文字使用深炭褐/白/灰；字号只使用 12/14/18px；无 Emoji、机器人头像、状态圆点、渐变或阴影。
 - 验证：`npm install` 成功安装 35 个依赖；`npm run build` 通过；`npm run dev -- --host localhost` 在 `http://localhost:5173/` 正常启动；`git diff --check` 通过。
 
+## Step 7.4 UI 微调：耗时显示精度
+
+- 修改：会话消息元数据和管理台 Trace 表中的 `latency_ms` 统一格式化为两位小数；缺失或非法值仍显示 `—`。
+- 边界：仅改变前端展示，不改变后端响应中的原始耗时数值和接口契约。
+
 ## Checkpoint 主链路
 
 - [x] FastAPI `/health`、`/chat` 与支持性管理 API 已有前端调用入口。

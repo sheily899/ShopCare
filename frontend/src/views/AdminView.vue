@@ -12,6 +12,11 @@ const busy = ref(false)
 const notice = ref('')
 const errorMessage = ref('')
 
+function formatLatency(value) {
+  if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) return '—'
+  return Number(value).toFixed(2)
+}
+
 async function loadOverview() {
   try {
     const [healthResponse, skillResponse, traceResponse] = await Promise.all([getHealth(), getSkills(), getTraces()])
@@ -145,7 +150,7 @@ onMounted(loadOverview)
         <table class="data-table">
           <thead><tr><th>请求ID</th><th>意图</th><th>处理节点</th><th>耗时</th></tr></thead>
           <tbody>
-            <tr v-for="trace in traces" :key="trace.request_id"><td>{{ trace.request_id }}</td><td>{{ trace.intent || '—' }}</td><td>{{ (trace.executed_agents || []).join('、') || '—' }}</td><td>{{ trace.latency_ms ?? '—' }}ms</td></tr>
+            <tr v-for="trace in traces" :key="trace.request_id"><td>{{ trace.request_id }}</td><td>{{ trace.intent || '—' }}</td><td>{{ (trace.executed_agents || []).join('、') || '—' }}</td><td>{{ formatLatency(trace.latency_ms) }}ms</td></tr>
             <tr v-if="!traces.length"><td colspan="4" class="empty-cell">暂无调用轨迹</td></tr>
           </tbody>
         </table>

@@ -352,8 +352,8 @@ SkillManager.skills_dir/*.md
 | --- | --- |
 | `frontend/package.json` / `frontend/vite.config.js` | 锁定 Vue `^3.5.25`、Vite `^7.2.7` 与 Vue 插件 `^6.0.2`，提供 dev/build/preview 脚本；开发服务默认 localhost:5173。 |
 | `frontend/src/App.vue` | 提供无路由依赖的“会话/管理”文字导航，只切换视图，不复制后端业务逻辑。 |
-| `frontend/src/views/ChatView.vue` | 实现 240px 历史会话栏、localStorage 会话持久化、ChatRequest 发送、消息元数据、转人工文案和安全 HTML 转义 Markdown 链接。 |
-| `frontend/src/views/AdminView.vue` | 实现知识库概况、检索探针、10MB 文件上传、技能热加载和内存 Trace 表格；未暴露的断路器状态标为“未暴露”。 |
+| `frontend/src/views/ChatView.vue` | 实现 240px 历史会话栏、localStorage 会话持久化、ChatRequest 发送、消息元数据、两位小数耗时展示、转人工文案和安全 HTML 转义 Markdown 链接。 |
+| `frontend/src/views/AdminView.vue` | 实现知识库概况、检索探针、10MB 文件上传、技能热加载和内存 Trace 表格；耗时统一显示两位小数；未暴露的断路器状态标为“未暴露”。 |
 | `frontend/src/api/index.js` | 统一封装对 `http://localhost:8000` 的 fetch 请求：`/chat`、`/health`、`/search`、`/knowledge/upload`、`/skills`、`/skills/reload`、`/trace/tools`。 |
 | `frontend/src/styles.css` | 固化 CREMA/TOMATO/PEAR 三色和 12/14/18px 三字号，采用纯文字与细边框布局，不引入 Emoji、图标库、渐变、状态点或重阴影。 |
 
