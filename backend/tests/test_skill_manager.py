@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import asyncio
 
 from agents.agent_orchestrator import GeneralAgent, Request, TechnicalAgent
-from skills.manager import SkillManager
+from skills.skill_manager import SkillManager
 
 
 SKILLS_ROOT = Path(__file__).parents[1] / "skills"

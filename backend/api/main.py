@@ -33,7 +33,7 @@ from core.intent_recognizer import IntentCategory, recognize_intent
 from mcp.knowledge_base import KnowledgeBase
 from mcp.tool_manager import MCPToolManager, Tool
 from memory.conversation_memory import MemoryContext, MemoryManager, MsgRole
-from skills.manager import SkillManager
+from skills.skill_manager import SkillManager
 
 
 logger = logging.getLogger(__name__)

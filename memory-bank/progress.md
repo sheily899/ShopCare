@@ -344,7 +344,7 @@
 
 - 状态：已完成，三个领域 Skill 已从既有 EchoMind 工程复制到 ShopCare 后端，保持 Markdown 原文和 frontmatter，不复制运行缓存或模型数据。
 - 新增：`backend/skills/technical/SKILL.md`、`backend/skills/billing/SKILL.md`、`backend/skills/general/SKILL.md`。
-- 新增：`backend/skills/manager.py` 与 `backend/skills/__init__.py`；SkillManager 递归扫描根目录 Markdown 和嵌套 `SKILL.md`，解析 `name`、`description`、`keywords`、`agents`、`enabled`，单文件异常只隔离该文件。
+- 新增：`backend/skills/skill_manager.py` 与 `backend/skills/__init__.py`；SkillManager 递归扫描根目录 Markdown 和嵌套 `SKILL.md`，解析 `name`、`description`、`keywords`、`agents`、`enabled`，单文件异常只隔离该文件。
 - Agent 集成：四类 Agent 通过注入同一个 SkillManager，按照 Skill frontmatter 的 `agents` 范围动态拼接系统 Prompt；单 Agent Prompt 的 Skill 文本上限为 `CUSTOMEROPS_SKILLS_MAX_PROMPT_CHARS`（默认 5000），避免上下文无限增长。
 - 路径边界：`CUSTOMEROPS_SKILLS_DIR` 默认 `skills`；从仓库根目录使用 `--app-dir backend` 启动时自动回退解析到 `backend/skills`，容器内仍使用 `/app/skills`。
 - 安全边界：Skill 只提供本地只读规则文本，不执行工具、不调用外部订单/支付/退款/工单系统；`/skills` 与 `/skills/reload` 仅返回本地扫描快照。

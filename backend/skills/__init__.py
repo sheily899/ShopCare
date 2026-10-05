@@ -4,6 +4,6 @@
 订单、支付、退款或工单写操作。
 """
 
-from .manager import SkillManager, SkillSpec
+from .skill_manager import SkillManager, SkillSpec
 
 __all__ = ["SkillManager", "SkillSpec"]
