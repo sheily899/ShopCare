@@ -458,6 +458,45 @@ class MemoryManager:
         text = getattr(response, "text", None)
         return text if isinstance(text, str) else ""
 
+    @staticmethod
+    def _parse_profile_json(raw_text: str) -> Dict[str, Any]:
+        """解析画像模型输出，兼容 fenced JSON 与前置说明文本。
+
+        Args:
+            raw_text: 模型返回的原始文本。
+
+        Returns:
+            通过画像 schema 校验后的字典。
+
+        Raises:
+            ValueError: 文本为空、不是 JSON 或不符合画像 schema。
+        """
+        text = (raw_text or "").strip()
+        if not text:
+            raise ValueError("画像模型未返回文本")
+
+        # 为什么：兼容模型偶尔返回 ```json ...```，避免可解析的画像被误判为失败。
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].strip().startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+
+        decoder = json.JSONDecoder()
+        candidates = [text]
+        # 为什么：少量模型会在 JSON 前后补一句解释；只从首个 JSON 对象开始解析，
+        # 不放宽画像字段校验，避免把自然语言误写入用户画像。
+        candidates.extend(text[index:] for index, char in enumerate(text) if char == "{")
+        for candidate in candidates:
+            try:
+                parsed, _ = decoder.raw_decode(candidate)
+            except (TypeError, ValueError):
+                continue
+            return MemoryManager._validate_profile_data(parsed)
+        raise ValueError("画像模型返回内容不是有效 JSON")
+
     async def _generate_summary(
         self, old_messages: List[Message], llm_client: Any = None
     ) -> str:
@@ -731,8 +770,8 @@ class MemoryManager:
                     {"role": "user", "content": self._profile_prompt(messages)}
                 ],
             )
-            raw_text = self._extract_llm_text(response).strip()
-            profile = self._validate_profile_data(json.loads(raw_text))
+            raw_text = self._extract_llm_text(response)
+            profile = self._parse_profile_json(raw_text)
             collection = await self._resolve_profile_collection()
             if collection is None:
                 return

@@ -135,6 +135,16 @@ def test_malformed_profile_does_not_overwrite_collection():
     assert collection.existing == '{"preferences":["旧偏好"],"entities":{}}'
 
 
+def test_profile_parser_accepts_fenced_json_with_explanation():
+    payload = {
+        "preferences": ["中文"],
+        "entities": {"product": ["耳机"]},
+    }
+    raw = "提取结果如下：\n```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```\n"
+
+    assert MemoryManager._parse_profile_json(raw) == payload
+
+
 def test_profile_background_task_swallows_llm_and_chroma_failures():
     redis = ProfileRedis()
     llm_failed = ProfileLLM(error=RuntimeError("network interrupted"))
