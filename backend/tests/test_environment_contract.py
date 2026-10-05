@@ -17,6 +17,7 @@ EXPECTED_REQUIREMENTS = {
     "python-multipart": "0.0.12",
     "redis": "5.2.1",
     "chromadb": "0.5.23",
+    "posthog": "2.5.0",
     "sentence-transformers": "3.3.1",
     "transformers": "4.46.3",
     "prometheus-client": "0.21.1",
@@ -35,6 +36,7 @@ EXPECTED_ENV_KEYS = {
     "CHROMA_HOST",
     "CHROMA_PORT",
     "CHROMA_PERSIST_DIRECTORY",
+    "ANONYMIZED_TELEMETRY",
     "CUSTOMEROPS_KB_COLLECTION",
     "CUSTOMEROPS_EMBEDDING_MODEL",
     "CUSTOMEROPS_SKILLS_DIR",
@@ -72,7 +74,7 @@ def _parse_env_keys() -> dict[str, str]:
     return values
 
 
-def test_requirements_lock_the_exact_thirteen_core_dependencies() -> None:
+def test_requirements_lock_the_exact_fourteen_core_dependencies() -> None:
     assert REQUIREMENTS.is_file()
     assert _parse_requirements() == EXPECTED_REQUIREMENTS
 

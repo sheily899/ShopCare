@@ -43,6 +43,7 @@ services:
       CHROMA_HOST: chromadb
       CHROMA_PORT: "8000"
       CHROMA_PERSIST_DIRECTORY: /app/.data/chroma
+      ANONYMIZED_TELEMETRY: "FALSE"
       CUSTOMEROPS_KB_COLLECTION: knowledge_base_zh
       CUSTOMEROPS_EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
       CUSTOMEROPS_SKILLS_DIR: /app/skills

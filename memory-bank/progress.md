@@ -340,6 +340,7 @@
 - 兼容：Windows 宿主机的 HTTP.sys 可能占用 80 端口，前端宿主端口改为 `${SHOPCARE_FRONTEND_PORT:-8080}`；容器内仍监听 80，Linux 或端口空闲环境可设置 `SHOPCARE_FRONTEND_PORT=80`。
 - 验证：`docker compose config --quiet` 通过；前端生产镜像与后端生产镜像均构建成功；Docker Desktop 首次构建曾受本机 buildx 权限拦截，授权后已完成验证。
 - 运行入口：`python -m uvicorn api.main:app --app-dir backend --reload`；知识库脚本：`python backend/scripts/init_knowledge_base.py`。
+- 运行期兼容修复：Chroma 0.5.23 使用旧版 `posthog.capture` 签名，后端 requirements 已锁定 `posthog==2.5.0`，Compose backend 显式关闭匿名 telemetry；已通过 Docker health、Redis PING、Chroma heartbeat 与真实 `/chat` 烟囱验证。
 
 ## Skill 能力落地与 Agent Prompt 注入
 

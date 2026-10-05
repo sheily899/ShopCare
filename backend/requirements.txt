@@ -5,6 +5,8 @@ pydantic==2.10.3
 python-multipart==0.0.12
 redis==5.2.1
 chromadb==0.5.23
+# ChromaDB 0.5.23 仍使用 posthog 2.x 的 capture(distinct_id, event, properties) 签名。
+posthog==2.5.0
 sentence-transformers==3.3.1
 transformers==4.46.3
 prometheus-client==0.21.1

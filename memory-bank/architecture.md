@@ -402,7 +402,7 @@ Browser :80
       -> chromadb:8000    (knowledge_base_zh / episodic / user_profile)
 ```
 
-Compose 使用健康依赖确保 Redis、Chroma 就绪后再启动后端，后端 `/health` 就绪后再启动前端；宿主机端口映射为 Redis `6379`、Chroma `8001`、API `8000`，前端默认 `8080`（通过 `SHOPCARE_FRONTEND_PORT` 可改为 80），容器内仍固定为 Nginx `80`。Anthropic 密钥只从根目录 `.env` 透传，不写入镜像或版本库。
+Compose 使用健康依赖确保 Redis、Chroma 就绪后再启动后端，后端 `/health` 就绪后再启动前端；宿主机端口映射为 Redis `6379`、Chroma `8001`、API `8000`，前端默认 `8080`（通过 `SHOPCARE_FRONTEND_PORT` 可改为 80），容器内仍固定为 Nginx `80`。Anthropic 密钥只从根目录 `.env` 透传，不写入镜像或版本库；backend 同步关闭匿名 telemetry，并将 `posthog` 固定到 Chroma 0.5.23 兼容的 2.5.0，避免传递依赖 API 不兼容造成启动告警。
 
 验证：`docker compose config --quiet` 通过；前端与后端生产镜像均已实际构建成功。
 
