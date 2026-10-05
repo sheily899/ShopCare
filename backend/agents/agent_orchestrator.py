@@ -262,6 +262,8 @@ class BaseAgent(ABC):
                 model=model,
                 max_tokens=self.profile.max_tokens,
                 temperature=self.profile.temperature,
+                # Why：领域 Agent 使用 Tool Use 时关闭 Thinking，避免兼容模型拒绝工具调用。
+                extra_body={"thinking": {"type": "disabled"}},
                 system=self.profile.mission,
                 tools=declarations,
                 messages=messages,

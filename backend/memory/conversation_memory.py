@@ -872,7 +872,15 @@ class MemoryManager:
         """
         kwargs: Dict[str, Any] = {"where": where, "n_results": limit}
         kwargs["query_texts"] = [query or ""]
-        return await asyncio.to_thread(collection.query, **kwargs)
+        try:
+            return await asyncio.to_thread(collection.query, **kwargs)
+        except Exception:
+            # Chroma 0.5 要求多字段过滤显式使用 $and；先保留兼容旧 Mock 的简单 where，
+            # 真实服务报错时再转换，避免破坏既有测试与本地替身。
+            if len(where) <= 1:
+                raise
+            kwargs["where"] = {"$and": [{key: value} for key, value in where.items()]}
+            return await asyncio.to_thread(collection.query, **kwargs)
 
     async def get_episodic_context(
         self,

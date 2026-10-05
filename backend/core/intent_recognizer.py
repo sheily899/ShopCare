@@ -338,6 +338,9 @@ async def _recognize_with_llm(
             model=selected_model,
             max_tokens=256,
             temperature=0.1,
+            # Why：部分兼容 Anthropic 的模型默认开启 Thinking，但 Thinking 与强制 Tool Use 冲突，
+            # 显式关闭才能稳定返回结构化意图结果。
+            extra_body={"thinking": {"type": "disabled"}},
             system=_LLM_SYSTEM_PROMPT,
             tools=[CLASSIFY_INTENT_TOOL],
             tool_choice={"type": "tool", "name": _INTENT_TOOL_NAME},
