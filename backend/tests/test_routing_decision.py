@@ -14,7 +14,7 @@ from agents.agent_orchestrator import (
     _execute,
     _route_decision,
 )
-from core.intent_recognizer import IntentCategory, IntentResult, UrgencyLevel
+from intent.intent_recognizer import IntentCategory, IntentResult, UrgencyLevel
 
 
 def _run(coroutine: Any) -> Any:

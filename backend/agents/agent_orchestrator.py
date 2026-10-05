@@ -20,7 +20,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
-from core.intent_recognizer import (
+from intent.intent_recognizer import (
     IntentCategory,
     IntentResult,
     UrgencyLevel,

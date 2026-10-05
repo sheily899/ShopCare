@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
-import core.intent_recognizer as recognizer
-from core.intent_recognizer import (
+import intent.intent_recognizer as recognizer
+from intent.intent_recognizer import (
     EmbeddingIntentResult,
     IntentCategory,
     LLMIntentResult,

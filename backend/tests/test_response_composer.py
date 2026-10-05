@@ -17,7 +17,7 @@ from agents.agent_orchestrator import (
     ResponseComposer,
     RoutingDecision,
 )
-from core.intent_recognizer import IntentCategory
+from intent.intent_recognizer import IntentCategory
 
 
 class _FakeComposerClient:

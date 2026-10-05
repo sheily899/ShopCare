@@ -9,7 +9,7 @@ try:
 except ModuleNotFoundError:  # 依赖基线尚未安装时仍保持异常路径可测
     TimeoutException = TimeoutError
 
-from core.intent_recognizer import (
+from intent.intent_recognizer import (
     CLASSIFY_INTENT_TOOL,
     IntentCategory,
     _recognize_with_llm,

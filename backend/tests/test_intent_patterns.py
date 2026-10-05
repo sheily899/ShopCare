@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.intent_recognizer import (
+from intent.intent_recognizer import (
     GENERIC_PATTERNS,
     SPECIFIC_PATTERNS,
     IntentCategory,

@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 import api.main as api_main
 from agents.agent_orchestrator import AgentType, OrchestratorResult
-from core.intent_recognizer import IntentCategory, IntentResult, UrgencyLevel
+from intent.intent_recognizer import IntentCategory, IntentResult, UrgencyLevel
 from memory.conversation_memory import MemoryContext, Message, MsgRole
 
 

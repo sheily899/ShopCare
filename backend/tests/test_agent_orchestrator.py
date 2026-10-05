@@ -18,7 +18,7 @@ from agents.agent_orchestrator import (
     Request,
     TechnicalAgent,
 )
-from core.intent_recognizer import IntentCategory, UrgencyLevel
+from intent.intent_recognizer import IntentCategory, UrgencyLevel
 
 
 def _run(coroutine: Any) -> Any:

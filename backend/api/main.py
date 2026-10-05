@@ -29,7 +29,7 @@ from agents.agent_orchestrator import (
     Request,
     TechnicalAgent,
 )
-from core.intent_recognizer import IntentCategory, recognize_intent
+from intent.intent_recognizer import IntentCategory, recognize_intent
 from mcp.knowledge_base import KnowledgeBase
 from mcp.tool_manager import MCPToolManager, Tool
 from memory.conversation_memory import MemoryContext, MemoryManager, MsgRole

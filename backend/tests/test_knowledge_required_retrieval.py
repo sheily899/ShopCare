@@ -14,7 +14,7 @@ from agents.agent_orchestrator import (
     RoutingDecision,
     TechnicalAgent,
 )
-from core.intent_recognizer import IntentCategory
+from intent.intent_recognizer import IntentCategory
 
 
 class _FakeClient:

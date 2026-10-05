@@ -17,12 +17,12 @@
 - `ChatResponse`：严格保留 system-spec 2.1 的字段、默认值、独立可变集合和范围约束；未添加业务路由或 lifespan。
 - 验证：`.venv\Scripts\python.exe -m pytest -q tests/test_environment_contract.py tests/test_api_contracts.py` → `16 passed`。
 - 环境：项目 `.venv` 已验证 FastAPI 0.115.5、Pydantic 2.10.3、pytest 8.3.4。
-- 边界：`core/intent_recognizer.py`、`agents/agent_orchestrator.py`、`tests/test_internal_contracts.py` 尚未创建，Step 1.3 未开始。
+- 边界：`intent/intent_recognizer.py`、`agents/agent_orchestrator.py`、`tests/test_internal_contracts.py` 尚未创建，Step 1.3 未开始。
 
 ## Step 1.3：内部核心 Dataclass 契约
 
 - 状态：已完成，等待人工确认后再进入 Step 2。
-- 已创建：`core/intent_recognizer.py`、`agents/agent_orchestrator.py`、`tests/test_internal_contracts.py`。
+- 已创建：`intent/intent_recognizer.py`、`agents/agent_orchestrator.py`、`tests/test_internal_contracts.py`。
 - 枚举：18 个 `IntentCategory` value，`ESCALATION` 为 `HUMAN_HANDOFF` 别名；`UrgencyLevel` 为 1–4 的 `IntEnum`；`AgentType` 为四类字符串枚举。
 - Dataclass：`IntentResult`、`AgentProfile`、`AgentResponse`、`Request`、`RoutingDecision`、`OrchestratorResult`，默认可变集合均使用 `default_factory`。
 - 验证：`.venv\Scripts\python.exe -m pytest -q tests/test_environment_contract.py tests/test_api_contracts.py tests/test_internal_contracts.py` → `23 passed`。
@@ -31,7 +31,7 @@
 ## Step 2.1：Pattern 规则、实体抽取与紧急度判定
 
 - 状态：已完成，等待人工确认后再进入 Step 2.2。
-- 修改：`core/intent_recognizer.py` 增加 18 类 Specific/Generic Pattern 表、`match_patterns`、`extract_entities`、`calculate_urgency`、`apply_500_override`。
+- 修改：`intent/intent_recognizer.py` 增加 18 类 Specific/Generic Pattern 表、`match_patterns`、`extract_entities`、`calculate_urgency`、`apply_500_override`。
 - Pattern：单规则命中 0.5，双规则 0.75，三次及以上封顶 1.0；返回候选、命中数、分数、最高候选和 `specific_score`。
 - 实体：固定返回 `order_id`、`product`、`date`、`amount`、`error_code` 五个 key；`product` 保持空数组。
 - 紧急度：按 CRITICAL > HIGH > MEDIUM > 意图兜底 > LOW；500 非登录意图覆盖为 `technical_crash` 且置信度至少 0.8。
@@ -41,7 +41,7 @@
 ## Step 2.2：LLM Tool Use 意图识别适配器
 
 - 状态：已完成，等待人工确认后再进入 Step 2.3。
-- 修改：`core/intent_recognizer.py` 增加严格的 `classify_intent` Tool Use schema、`LLMIntentResult` dataclass、异步 `_recognize_with_llm` 及 Anthropic 响应解析与失败降级。
+- 修改：`intent/intent_recognizer.py` 增加严格的 `classify_intent` Tool Use schema、`LLMIntentResult` dataclass、异步 `_recognize_with_llm` 及 Anthropic 响应解析与失败降级。
 - 契约：工具名固定为 `classify_intent`；18 个意图值由 `IntentCategory` 生成；`intent`、`confidence`、`reasoning` 为必填字段；`additionalProperties=False`；强制 `tool_choice`。
 - 解析与容错：合法 payload 返回 `success=True`；未知意图、缺失/额外字段、无 tool_use、非法 reasoning、非有限置信度和客户端异常统一返回 `OTHER`、`0.0`、`success=False`；数值置信度越界安全截断到 0..1。
 - 测试：新增 `tests/test_intent_llm_tool.py`，使用 `AsyncMock`，不发真实公网请求；覆盖成功解析、调用参数、schema、未知意图、越界置信度、缺失字段、无 tool_use 与超时异常。
@@ -51,7 +51,7 @@
 ## Step 2.3：Embedding 与三路加权融合
 
 - 状态：已完成，等待人工确认后再进入 Step 2.4。
-- 修改：`core/intent_recognizer.py` 增加 18 类模板文本、固定 256 维字符 1/2/3-gram MD5 哈希向量、余弦相似度、可选远程 Embedding 尝试与本地降级，以及异步 `recognize_intent` 三路汇聚。
+- 修改：`intent/intent_recognizer.py` 增加 18 类模板文本、固定 256 维字符 1/2/3-gram MD5 哈希向量、余弦相似度、可选远程 Embedding 尝试与本地降级，以及异步 `recognize_intent` 三路汇聚。
 - 融合：LLM、Embedding、Pattern 使用 `asyncio.create_task` 与 `gather(return_exceptions=True)`；Embedding 成功时权重为 0.7/0.2/0.1，来源失败时切换为 0.85/0.15。
 - 阈值：融合分低于 0.5 强制 `OTHER`；LLM 失败时仅接受 Embedding 分数不低于 0.45；特异 Pattern 分数不低于 0.5 且融合低于 0.8 时细化泛化意图；500 非登录请求最终覆盖为 `technical_crash` 且置信度至少 0.8。
 - 诊断：`IntentResult` 增加 `intent_diagnostics`，记录来源意图/分数、权重、失败状态、fallback、细化、最终意图与置信度；同时装配 urgency、entities 与 latency。
@@ -62,7 +62,7 @@
 ## Step 2.4：复合意图解析与跨域次要意图切分
 
 - 状态：已完成，Checkpoint B 已闭环；未开始 Step 3。
-- 修改：`core/intent_recognizer.py` 增加连接词/标点白名单切分、最长 Pattern 命中候选、三大业务域映射、同域与泛化候选过滤、跨域次意图去重及最多 3 个的硬上限。
+- 修改：`intent/intent_recognizer.py` 增加连接词/标点白名单切分、最长 Pattern 命中候选、三大业务域映射、同域与泛化候选过滤、跨域次意图去重及最多 3 个的硬上限。
 - 终止与诊断：主意图为 `HUMAN_HANDOFF` 时无条件清空 secondary；`compound_trigger` 记录切分触发词；诊断字段记录 clauses、clause matches、secondary intents 与 scoped retrieval queries。
 - 检索范围：存在合法 secondary 时按领域合并对应子句；没有合法 secondary 时保留完整原始消息作为默认查询。
 - 测试：新增 `tests/test_compound_intent.py`，覆盖单意图守门、技术+账单跨域、同域过滤、3 个上限、人工终止和主链路字段装配。

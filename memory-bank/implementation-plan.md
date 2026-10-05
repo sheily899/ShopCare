@@ -93,7 +93,7 @@ Step 1 契约与环境
 
 【目标与修改文件清单】
 
-- 创建 core/intent_recognizer.py 的 Enum、IntentResult、UrgencyLevel。
+- 创建 intent/intent_recognizer.py 的 Enum、IntentResult、UrgencyLevel。
 - 创建 agents/agent_orchestrator.py 的 AgentType、AgentProfile、AgentResponse、Request、OrchestratorResult、RoutingDecision。
 - 创建 tests/test_internal_contracts.py。
 
@@ -130,7 +130,7 @@ Step 1 契约与环境
 
 【目标与修改文件清单】
 
-- 完善 core/intent_recognizer.py 的 pattern、entity、urgency 纯函数。
+- 完善 intent/intent_recognizer.py 的 pattern、entity、urgency 纯函数。
 - 创建 tests/test_intent_patterns.py。
 
 【具体的代码实现逻辑要点】
@@ -155,7 +155,7 @@ Step 1 契约与环境
 
 【目标与修改文件清单】
 
-- 修改 core/intent_recognizer.py。
+- 修改 intent/intent_recognizer.py。
 - 创建 tests/test_intent_llm_tool.py。
 
 【具体的代码实现逻辑要点】
@@ -180,7 +180,7 @@ Step 1 契约与环境
 
 【目标与修改文件清单】
 
-- 修改 core/intent_recognizer.py。
+- 修改 intent/intent_recognizer.py。
 - 创建 tests/test_intent_diagnostics.py。
 
 【具体的代码实现逻辑要点】
@@ -207,7 +207,7 @@ Step 1 契约与环境
 
 【目标与修改文件清单】
 
-- 修改 core/intent_recognizer.py。
+- 修改 intent/intent_recognizer.py。
 - 创建 tests/test_compound_intent.py。
 
 【具体的代码实现逻辑要点】

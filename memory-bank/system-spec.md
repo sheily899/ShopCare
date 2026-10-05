@@ -14,7 +14,7 @@
 
 ## 1. 业务域与意图分类体系
 
-证据：core/intent_recognizer.py、agents/agent_orchestrator.py。
+证据：intent/intent_recognizer.py、agents/agent_orchestrator.py。
 
 ### 1.1 硬编码分类
 

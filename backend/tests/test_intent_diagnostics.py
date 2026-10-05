@@ -4,8 +4,8 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import core.intent_recognizer as recognizer
-from core.intent_recognizer import (
+import intent.intent_recognizer as recognizer
+from intent.intent_recognizer import (
     EmbeddingIntentResult,
     EMBEDDING_TEMPLATES,
     IntentCategory,

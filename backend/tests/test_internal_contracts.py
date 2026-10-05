@@ -13,7 +13,7 @@ from agents.agent_orchestrator import (
     Request,
     RoutingDecision,
 )
-from core.intent_recognizer import IntentCategory, IntentResult, UrgencyLevel
+from intent.intent_recognizer import IntentCategory, IntentResult, UrgencyLevel
 
 
 EXPECTED_INTENTS = {
