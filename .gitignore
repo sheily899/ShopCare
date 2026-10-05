@@ -14,5 +14,6 @@ backend/.data/
 data/runtime/
 data/chroma/
 *.log
+chroma.log
 frontend/node_modules/
 frontend/dist/

@@ -44,14 +44,6 @@ export function uploadKnowledge(file) {
   return request('/knowledge/upload', { method: 'POST', body: form })
 }
 
-export function reloadSkills() {
-  return request('/skills/reload', { method: 'POST' })
-}
-
-export function getSkills() {
-  return request('/skills')
-}
-
 export function getTraces() {
   return request('/trace/tools')
 }
