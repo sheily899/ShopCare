@@ -100,7 +100,10 @@ def test_escalation_agent_is_deterministic_and_skips_llm() -> None:
 
     assert result.success is True
     assert result.agent_type is AgentType.ESCALATION
-    assert "已生成交接摘要与升级建议" in result.content
+    assert result.content == "您的问题已记录下来，当前建议联系人工客服进一步核实和处理。"
+    assert "request_id" not in result.content
+    assert "human_handoff" not in result.content
+    assert "紧急度" not in result.content
     assert "已接入" not in result.content
     assert client.calls == []
     assert agent.stats.total == 1

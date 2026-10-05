@@ -556,13 +556,8 @@ class EscalationAgent(BaseAgent):
         started = time.perf_counter()
         self.stats.total += 1
         try:
-            intent = request.intent.value if isinstance(request.intent, IntentCategory) else str(request.intent or "other")
-            urgency = request.urgency.value if isinstance(request.urgency, UrgencyLevel) else request.urgency or 1
-            content = (
-                f"已生成交接摘要与升级建议（request_id={request.request_id}，"
-                f"原因：{request.message[:120]}，意图：{intent}，紧急度：{urgency}）。"
-                "当前仅记录会话上下文，不会创建外部工单。"
-            )
+            # Why：request_id、意图和紧急度属于内部追踪字段，不应混入用户可见的客服回复正文。
+            content = "您的问题已记录下来，当前建议联系人工客服进一步核实和处理。"
             latency_ms = max(0.0, (time.perf_counter() - started) * 1000)
             self.stats.success += 1
             self.stats.total_ms += latency_ms
