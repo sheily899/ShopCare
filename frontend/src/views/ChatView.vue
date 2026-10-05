@@ -57,6 +57,12 @@ function renderTable(lines) {
   return `<table><thead><tr>${headers}</tr></thead><tbody>${body}</tbody></table>`
 }
 
+function isHorizontalRule(line) {
+  const normalized = String(line ?? '').trim()
+  return normalized === '---' || normalized === '***' || normalized === '___'
+    || /^(?:-{3,}|\*{3,}|_{3,})$/.test(normalized)
+}
+
 function renderMarkdown(value) {
   const lines = String(value ?? '').replace(/\r\n?/g, '\n').split('\n')
   const output = []
@@ -66,7 +72,7 @@ function renderMarkdown(value) {
     if (!line.trim()) { index += 1; continue }
 
     // Markdown 水平分隔线必须作为独立块处理，避免被当作普通文本显示为三个短横线。
-    if (/^\s{0,3}(?:---+|\*\*\*+|___+)\s*$/.test(line)) {
+    if (isHorizontalRule(line)) {
       output.push('<hr>')
       index += 1
       continue
@@ -131,7 +137,7 @@ function renderMarkdown(value) {
     const paragraph = []
     while (index < lines.length && lines[index].trim()) {
       const current = lines[index]
-      if (paragraph.length && (/^\s*```/.test(current) || /^\s*(#{1,3})\s+/.test(current) || /^\s*[-*+]\s+/.test(current) || /^\s*\d+[.)]\s+/.test(current) || /^\s{0,3}(?:---+|\*\*\*+|___+)\s*$/.test(current))) break
+      if (paragraph.length && (/^\s*```/.test(current) || /^\s*(#{1,3})\s+/.test(current) || /^\s*[-*+]\s+/.test(current) || /^\s*\d+[.)]\s+/.test(current) || isHorizontalRule(current))) break
       paragraph.push(escapeHtml(current))
       index += 1
     }
