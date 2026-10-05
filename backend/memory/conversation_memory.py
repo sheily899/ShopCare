@@ -425,7 +425,14 @@ class MemoryManager:
             from anthropic import AsyncAnthropic
         except Exception as exc:  # pragma: no cover - dependency/environment path
             raise RuntimeError(f"Anthropic SDK 不可用: {exc}") from exc
-        self._llm_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY 未配置")
+        kwargs: Dict[str, Any] = {"api_key": api_key}
+        base_url = os.getenv("ANTHROPIC_BASE_URL", "").strip()
+        if base_url:
+            kwargs["base_url"] = base_url
+        self._llm_client = AsyncAnthropic(**kwargs)
         return self._llm_client
 
     @staticmethod

@@ -278,7 +278,9 @@ async def lifespan(app: FastAPI):
     try:
         from dotenv import load_dotenv
 
-        load_dotenv()
+        # Why：以 api/main.py 所在 backend 目录为基准，避免从仓库根目录或
+        # 其他工作目录启动 Uvicorn 时漏读 backend/.env，造成 LLM client 为空。
+        load_dotenv(dotenv_path=Path(__file__).resolve().parents[1] / ".env")
     except Exception as exc:  # pragma: no cover - python-dotenv 可选安装差异
         logger.warning(".env 加载失败，继续使用系统环境变量：%s", exc)
 
