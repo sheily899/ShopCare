@@ -176,7 +176,7 @@ AgentStats(total=0, success=0, total_ms=0.0, monitor_penalty=0.0) 的评分公�
 
 ## 8. 评测与测试基线
 
-证据：evaluation/evaluator.py、evaluation/deterministic_metrics.py、evaluation/datasets/golden_benchmark.json、evaluation/run_phase2_cases.ps1、tests。
+证据：evaluation/evaluator.py、evaluation/deterministic_metrics.py、evaluation/datasets/golden_benchmark.json、evaluation/datasets/benchmark_corpus.json、evaluation/run_phase2_cases.ps1、tests；其中 benchmark corpus 仅用于离线评测，不进入产品知识库 collection。
 
 ### 8.1 API 评测
 

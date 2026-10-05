@@ -129,7 +129,7 @@
 - Embedding：默认 `BAAI/bge-small-zh-v1.5`，固定 `device="cpu"`、`normalize_embeddings=True`；collection metadata 固定 `hnsw:space=l2`。
 - 切片与元数据：升级为 Markdown Header-Aware 切片，优先按 `##`/`###` 标题边界拆分并注入 `[一级标题 > 二级标题 > 三级标题]` 面包屑；超长小节按段落、句号和硬截断拆分，单片（含前缀）最多 500 字符。每片写入 `title`、`source_document_id`、`source_chunk_id`、`content_hash`、`chunk_index`、`total_chunks`、`corpus_version` 七项字段，source_chunk_id 格式为 `{source_document_id}_chunk_{chunk_index}`。
 - 检索：返回 `title`、`content`、`score`、`id` 与稳定 chunk 身份；`score=round(1-distance,4)`，不设置 score threshold，也不将 score 解释为概率。
-- 源文本：仅落位 6 篇产品客服 Markdown；未复制老工程 `data/chroma` 二进制，也未混入 `knowledge_base_benchmark_v2.1_main100.json`。
+- 产品知识源文本：仅落位 6 篇产品客服 Markdown；未复制老工程 `data/chroma` 二进制，也未将评测语料混入产品 collection。评测基线语料已独立迁移为 `backend/evaluation/datasets/benchmark_corpus.json`。
 - 入库：`python scripts/init_knowledge_base.py` 扫描 `data/knowledge/*.md`，默认写入项目 `.data/chroma` 的产品 collection，并输出文档数、chunk 数和耗时。
 - 启动兼容：新增 `mcp/__init__.py` 并固定脚本将项目根目录置于 `sys.path` 首位，避免系统同名第三方 `mcp` 包导致 `ModuleNotFoundError`。
 - 验证：知识库专项测试 → `11 passed`；Header-Aware 专项断言六篇文档生成 18 个 chunk、最大 244 字符并聚焦 401 片段；全量 pytest → `88 passed`；脚本 `--help`、compileall 与 `git diff --check` 通过。
