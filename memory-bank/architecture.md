@@ -405,3 +405,28 @@ Browser :80
 Compose 使用健康依赖确保 Redis、Chroma 就绪后再启动后端，后端 `/health` 就绪后再启动前端；宿主机端口映射为 Redis `6379`、Chroma `8001`、API `8000`，前端默认 `8080`（通过 `SHOPCARE_FRONTEND_PORT` 可改为 80），容器内仍固定为 Nginx `80`。Anthropic 密钥只从根目录 `.env` 透传，不写入镜像或版本库。
 
 验证：`docker compose config --quiet` 通过；前端与后端生产镜像均已实际构建成功。
+
+## Skill 能力落地与 Agent Prompt 注入
+
+| 文件/目录 | 职责 |
+| --- | --- |
+| `backend/skills/technical_support/SKILL.md` | 技术支持 Agent 的错误码、接口、配置和低风险排障规则；frontmatter 的 `agents: technical` 限定注入范围。 |
+| `backend/skills/billing_support/SKILL.md` | 账单、退款、发票和订阅处理规则；frontmatter 的 `agents: billing` 限定注入范围。 |
+| `backend/skills/general_customer_service/SKILL.md` | 通用接待、信息澄清和分流规则；frontmatter 的 `agents: general` 限定注入范围。 |
+| `backend/skills/manager.py` | 本地 Skill 递归扫描、frontmatter 解析、启用状态过滤、Agent 范围过滤和 Prompt 长度控制；不连接外部服务。 |
+| `backend/agents/agent_orchestrator.py` | BaseAgent 通过 SkillManager 动态取得本 Agent 的 Skill Prompt，并与固定 Profile mission 合并后发送给 LLM。 |
+| `backend/api/main.py` | 生命周期中创建 SkillManager 并注入四类 Agent；`/skills` 与 `/skills/reload` 保留本地扫描快照 API。 |
+
+Skill 数据流：
+
+```text
+backend/skills/*/SKILL.md
+  -> SkillManager.reload_skills()
+  -> frontmatter agents 过滤
+  -> BaseAgent._system_prompt()
+  -> Anthropic system Prompt
+```
+
+- Skill 文本只作为领域规则提示，不改变 Agent 工具白名单，也不绕过已有的外部业务安全边界。
+- SkillManager 采用标准库解析简单 frontmatter，避免新增未锁定 YAML 依赖。
+- Prompt 注入默认上限 5000 字符；单个 Skill 损坏时只记录 warning 并跳过，不阻断 API 启动。

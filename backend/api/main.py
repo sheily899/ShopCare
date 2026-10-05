@@ -33,6 +33,7 @@ from core.intent_recognizer import IntentCategory, recognize_intent
 from mcp.knowledge_base import KnowledgeBase
 from mcp.tool_manager import MCPToolManager, Tool
 from memory.conversation_memory import MemoryContext, MemoryManager, MsgRole
+from skills.manager import SkillManager
 
 
 logger = logging.getLogger(__name__)
@@ -84,40 +85,6 @@ class IntentRecognizer:
         return await self.recognize(message, history)
 
 
-class SkillManager:
-    """扫描本地技能目录的生命周期占位组件，不连接外部服务。
-
-    Args:
-        skills_dir: 本地技能目录；目录不存在时视为空目录。
-
-    Returns:
-        无；实例仅保存本地路径和可发现的技能名称。
-    """
-
-    def __init__(self, skills_dir: str = "skills") -> None:
-        self.skills_dir = Path(skills_dir)
-        self.skills: List[str] = []
-        self.reload_skills()
-
-    def reload_skills(self) -> Dict[str, Any]:
-        """重新扫描本地 Markdown 技能目录并返回当前技能快照。
-
-        Returns:
-            包含 ``success``、``skills`` 与 ``count`` 的本地扫描结果；目录不存在
-            时返回空列表，不访问任何外部服务。
-        """
-
-        self.skills = (
-            sorted(path.stem for path in self.skills_dir.glob("*.md"))
-            if self.skills_dir.is_dir()
-            else []
-        )
-        return {"success": True, "skills": list(self.skills), "count": len(self.skills)}
-
-    async def close(self) -> None:
-        """释放技能扫描器资源；当前扫描为本地只读操作，无需额外动作。"""
-
-
 class PerformanceMonitor:
     """保存生命周期级监控配置的轻量组件。
 
@@ -163,7 +130,8 @@ def _read_settings() -> Dict[str, str]:
         "CHROMA_PERSIST_DIRECTORY": ".data/chroma",
         "CUSTOMEROPS_KB_COLLECTION": "knowledge_base_zh",
         "CUSTOMEROPS_EMBEDDING_MODEL": "BAAI/bge-small-zh-v1.5",
-        "SKILLS_DIR": "skills",
+        "CUSTOMEROPS_SKILLS_DIR": "skills",
+        "CUSTOMEROPS_SKILLS_MAX_PROMPT_CHARS": "5000",
         "EVALUATION_DATASET": "evaluation/datasets/golden_benchmark_v2.1_100.json",
     }
     return {key: os.getenv(key, default) for key, default in defaults.items()}
@@ -339,11 +307,15 @@ async def lifespan(app: FastAPI):
         model=settings["ANTHROPIC_MODEL"],
     )
     intent_recognizer = IntentRecognizer(model=settings["ANTHROPIC_MODEL"])
+    skill_manager = SkillManager(
+        settings["CUSTOMEROPS_SKILLS_DIR"],
+        max_prompt_chars=int(settings["CUSTOMEROPS_SKILLS_MAX_PROMPT_CHARS"]),
+    )
     agents = {
-        "general": GeneralAgent(client=anthropic_client),
-        "technical": TechnicalAgent(client=anthropic_client),
-        "billing": BillingAgent(client=anthropic_client),
-        "escalation": EscalationAgent(client=anthropic_client),
+        "general": GeneralAgent(client=anthropic_client, skill_manager=skill_manager),
+        "technical": TechnicalAgent(client=anthropic_client, skill_manager=skill_manager),
+        "billing": BillingAgent(client=anthropic_client, skill_manager=skill_manager),
+        "escalation": EscalationAgent(client=anthropic_client, skill_manager=skill_manager),
     }
     typed_agents = {
         AgentType.GENERAL: agents["general"],
@@ -355,7 +327,6 @@ async def lifespan(app: FastAPI):
         agent_pool=typed_agents,
         knowledge_search=knowledge_base,
     )
-    skill_manager = SkillManager(settings["SKILLS_DIR"])
     performance_monitor = PerformanceMonitor()
     evaluator = EndToEndEvaluator(settings["EVALUATION_DATASET"])
 

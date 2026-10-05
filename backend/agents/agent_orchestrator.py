@@ -219,12 +219,33 @@ class BaseAgent(ABC):
         tools: Optional[List[AgentToolSpec]] = None,
         client: Optional[Any] = None,
         stats: Optional[AgentStats] = None,
+        skill_manager: Optional[Any] = None,
     ) -> None:
         self.agent_type = agent_type
         self.profile = profile
         self.tools: List[AgentToolSpec] = list(tools or [])
         self.client = client
         self.stats = stats or AgentStats()
+        self.skill_manager = skill_manager
+
+    def _system_prompt(self) -> str:
+        """合并领域 Profile 与当前 Agent 可见的本地 Skill Prompt。
+
+        Returns:
+            供 Anthropic 请求使用的系统提示词；Skill 管理器不可用时仅返回
+            固定的领域 Profile，不影响 Agent 的基础执行。
+        """
+
+        if self.skill_manager is None:
+            return self.profile.mission
+        try:
+            skill_prompt = self.skill_manager.prompt_for_agent(self.agent_type.value)
+        except Exception as exc:  # pragma: no cover - 仅在可选 Skill 管理器异常时触发
+            logger.warning("Skill Prompt 注入失败，将使用 Agent Profile：%s", exc)
+            return self.profile.mission
+        if not skill_prompt:
+            return self.profile.mission
+        return f"{self.profile.mission}\n\n{skill_prompt}"
 
     def _tool_context(self, request: Request) -> Dict[str, Any]:
         """构造只读请求快照，供白名单工具执行时使用。"""
@@ -264,7 +285,7 @@ class BaseAgent(ABC):
                 temperature=self.profile.temperature,
                 # Why：领域 Agent 使用 Tool Use 时关闭 Thinking，避免兼容模型拒绝工具调用。
                 extra_body={"thinking": {"type": "disabled"}},
-                system=self.profile.mission,
+                system=self._system_prompt(),
                 tools=declarations,
                 messages=messages,
             )
@@ -441,6 +462,7 @@ class GeneralAgent(BaseAgent):
         client: Optional[Any] = None,
         tools: Optional[List[AgentToolSpec]] = None,
         stats: Optional[AgentStats] = None,
+        skill_manager: Optional[Any] = None,
     ) -> None:
         default_tools = list(general_tools().values())
         default_tools.insert(0, SEARCH_KNOWLEDGE_BASE_TOOL)
@@ -450,6 +472,7 @@ class GeneralAgent(BaseAgent):
             default_tools if tools is None else tools,
             client,
             stats,
+            skill_manager,
         )
 
 
@@ -461,6 +484,7 @@ class TechnicalAgent(BaseAgent):
         client: Optional[Any] = None,
         tools: Optional[List[AgentToolSpec]] = None,
         stats: Optional[AgentStats] = None,
+        skill_manager: Optional[Any] = None,
     ) -> None:
         default_tools = [SEARCH_KNOWLEDGE_BASE_TOOL, *technical_tools().values()]
         super().__init__(
@@ -469,6 +493,7 @@ class TechnicalAgent(BaseAgent):
             default_tools if tools is None else tools,
             client,
             stats,
+            skill_manager,
         )
 
 
@@ -480,6 +505,7 @@ class BillingAgent(BaseAgent):
         client: Optional[Any] = None,
         tools: Optional[List[AgentToolSpec]] = None,
         stats: Optional[AgentStats] = None,
+        skill_manager: Optional[Any] = None,
     ) -> None:
         default_tools = [SEARCH_KNOWLEDGE_BASE_TOOL, *billing_tools().values()]
         super().__init__(
@@ -488,6 +514,7 @@ class BillingAgent(BaseAgent):
             default_tools if tools is None else tools,
             client,
             stats,
+            skill_manager,
         )
 
 
@@ -499,6 +526,7 @@ class EscalationAgent(BaseAgent):
         client: Optional[Any] = None,
         tools: Optional[List[AgentToolSpec]] = None,
         stats: Optional[AgentStats] = None,
+        skill_manager: Optional[Any] = None,
     ) -> None:
         default_tools = [SEARCH_KNOWLEDGE_BASE_TOOL, CREATE_HANDOFF_SUMMARY_TOOL]
         super().__init__(
@@ -507,6 +535,7 @@ class EscalationAgent(BaseAgent):
             default_tools if tools is None else tools,
             client,
             stats,
+            skill_manager,
         )
 
     async def handle(
