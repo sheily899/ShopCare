@@ -768,7 +768,7 @@ Step 1 契约与环境
 
 【目标与修改文件清单】
 
-- 创建 evaluation/datasets/golden_benchmark_v2.1_100.json 的路径校验与加载器。
+- 创建 evaluation/datasets/golden_benchmark.json 的路径校验与加载器。
 - 修改 evaluation/run_phase2_cases.ps1。
 - 创建 tests/test_phase2_runner_contract.py。
 

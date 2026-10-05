@@ -176,7 +176,7 @@ AgentStats(total=0, success=0, total_ms=0.0, monitor_penalty=0.0) 的评分公�
 
 ## 8. 评测与测试基线
 
-证据：evaluation/evaluator.py、evaluation/deterministic_metrics.py、evaluation/datasets/golden_benchmark_v2.1_100.json、evaluation/run_phase2_cases.ps1、tests。
+证据：evaluation/evaluator.py、evaluation/deterministic_metrics.py、evaluation/datasets/golden_benchmark.json、evaluation/run_phase2_cases.ps1、tests。
 
 ### 8.1 API 评测
 
@@ -187,7 +187,7 @@ AgentStats(total=0, success=0, total_ms=0.0, monitor_penalty=0.0) 的评分公�
 
 ### 8.2 100 条基准与确定性指标
 
-golden_benchmark_v2.1_100.json 顶层是对象：dataset_id=customerops-golden-v2.1.1-100、schema_version=2.1、case_count=100、8 条 regression baseline + 92 条新增 case、knowledge_base_version=kb-v2.1-main-100。
+golden_benchmark.json 顶层是对象：dataset_id=customerops-golden-v2.1.1-100、schema_version=2.1、case_count=100、8 条 regression baseline + 92 条新增 case、knowledge_base_version=kb-v2.1-main-100。
 
 真实样本在 cases，包含 case_id、task_types、domain、scenario、difficulty、risk_level、user_question、expected_intent、conversation、gold_intent、gold_route、gold_chunk、gold_retrieval、gold_answer、gold_tools、gold_safety、evaluation。它提供 ground truth intent/route/chunk、required facts/actions、forbidden claims、工具顺序和安全约束。
 

@@ -47,7 +47,7 @@ ShopCare 是一个只读知识大脑加安全转人工兜底的客服分流中�
 | 意图识别质量 | 以 Golden Benchmark 的 expected_intent 与确定性指标计算 accuracy、per-class F1、macro-F1 | 源码没有已验证的 91% 实测结果；91% 不能作为当前已达成成绩 |
 | 意图改进提示线 | Evaluator 在 intent_accuracy < 90% 时给出补样本/优化建议 | 这是建议阈值，不是系统已承诺的 SLA |
 | 跨域分流确定性 | 只接受识别器确认的跨域 secondary_intents，最多 3 个；禁止仅凭关键词并发 | 需通过 Gold Route、supporting agent 与 trace 验证 |
-| 100 条业务基准 | golden_benchmark_v2.1_100.json：100 case，8 条回归样本加 92 条新增样本 | 基准通过率必须由实际运行产生，不能在 PRD 中预填成绩 |
+| 100 条业务基准 | golden_benchmark.json：100 case，8 条回归样本加 92 条新增样本 | 基准通过率必须由实际运行产生，不能在 PRD 中预填成绩 |
 | 对话质量 | EndToEndEvaluator 使用四维 0..1 分；单案例 PASS_THRESHOLD=0.75 | Judge 失败的 0.5 占位分不计入正常质量均分 |
 | 响应时延 | Monitor 的告警边界为 Agent 平均耗时 >3000ms、工具平均耗时 >5000ms | 源码未定义端到端 P95/P99 SLA；本期只能以这些平均耗时告警线做运行验收 |
 | 资损零越权 | 没有真实订单/支付写操作；billing 工具不能确认退款；转人工不承诺业务结果 | 这是权限与话术边界，不是“已完成退款”的业务指标 |
@@ -226,7 +226,7 @@ ChatResponse 必须至少返回：conv_id、request_id、response、intent、sec
 
 | 层级 | 机制 | 验收意义 |
 | --- | --- | --- |
-| 离线确定性评测 | golden_benchmark_v2.1_100.json 与 deterministic_metrics.py | 校验意图、路由、门控、RAG Recall/MRR/nDCG、答案约束、工具顺序、升级和系统稳定性 |
+| 离线确定性评测 | golden_benchmark.json 与 deterministic_metrics.py | 校验意图、路由、门控、RAG Recall/MRR/nDCG、答案约束、工具顺序、升级和系统稳定性 |
 | 端到端评测 | EndToEndEvaluator | 计算意图 accuracy/F1，并通过 LLM Judge 对对话质量评分 |
 | 质量维度 | relevance、accuracy、completeness、helpfulness | 每项 0..1；综合单例阈值 0.75 |
 | 回归 | 当前结果相对历史内存或 EVAL_BASELINE_PATH | 指标下降超过 5% 标记 regression |

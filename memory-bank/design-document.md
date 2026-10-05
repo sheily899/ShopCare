@@ -469,7 +469,7 @@ EscalationAgent 生成 request_id、原因、意图、紧急度、实体；固�
 
 ### 4.1 100 条基准流水线
 
-1. 读取 golden_benchmark_v2.1_100.json，顶层对象取 cases，校验 case_count=100。
+1. 读取 golden_benchmark.json，顶层对象取 cases，校验 case_count=100。
 2. 启动前 GET /health，验证 collection 与 embedding model；产品库 knowledge_base_zh 与 benchmark 库 knowledge_base_benchmark_v2 必须明确区分。
 3. 每个 case 为同一 conversation 复用 user_id/conv_id；多轮只提交 role=user 的 turns。
 4. POST /chat，保存 request_id、intent、route、tools、knowledge_used、latency、response。

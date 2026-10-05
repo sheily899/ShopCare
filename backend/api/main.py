@@ -132,7 +132,7 @@ def _read_settings() -> Dict[str, str]:
         "CUSTOMEROPS_EMBEDDING_MODEL": "BAAI/bge-small-zh-v1.5",
         "CUSTOMEROPS_SKILLS_DIR": "skills",
         "CUSTOMEROPS_SKILLS_MAX_PROMPT_CHARS": "5000",
-        "EVALUATION_DATASET": "evaluation/datasets/golden_benchmark_v2.1_100.json",
+        "EVALUATION_DATASET": "evaluation/datasets/golden_benchmark.json",
     }
     return {key: os.getenv(key, default) for key, default in defaults.items()}
 
