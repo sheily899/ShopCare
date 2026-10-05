@@ -114,6 +114,7 @@ def test_update_profile_extracts_json_and_persists_stable_document():
     assert "T" in metadata["updated_at"]
     assert llm.calls[0]["temperature"] == 0
     assert llm.calls[0]["max_tokens"] == 512
+    assert llm.calls[0]["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
 async def _create_task(coroutine):

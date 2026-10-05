@@ -766,6 +766,8 @@ class MemoryManager:
                 model=self._model,
                 max_tokens=512,
                 temperature=0,
+                # Why：DeepSeek 默认可能只返回 thinking block；画像抽取必须拿到可解析的 JSON 文本。
+                extra_body={"thinking": {"type": "disabled"}},
                 messages=[
                     {"role": "user", "content": self._profile_prompt(messages)}
                 ],
