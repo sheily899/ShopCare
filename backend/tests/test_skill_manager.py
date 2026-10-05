@@ -19,12 +19,12 @@ def test_skill_manager_loads_nested_skill_documents() -> None:
     manager = SkillManager(str(SKILLS_ROOT))
 
     assert manager.skills == [
-        "billing_support",
-        "general_customer_service",
-        "technical_support",
+        "billing",
+        "general",
+        "technical",
     ]
-    assert manager.specs["technical_support"].agents == ("technical",)
-    assert manager.specs["billing_support"].enabled is True
+    assert manager.specs["technical"].agents == ("technical",)
+    assert manager.specs["billing"].enabled is True
 
 
 def test_relative_skill_path_resolves_from_backend_package(monkeypatch) -> None:
@@ -34,7 +34,7 @@ def test_relative_skill_path_resolves_from_backend_package(monkeypatch) -> None:
 
     manager = SkillManager("skills")
 
-    assert "technical_support" in manager.skills
+    assert "technical" in manager.skills
 
 
 def test_skill_prompt_is_filtered_by_agent_scope() -> None:

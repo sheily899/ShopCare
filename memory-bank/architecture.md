@@ -410,9 +410,9 @@ Compose 使用健康依赖确保 Redis、Chroma 就绪后再启动后端，后�
 
 | 文件/目录 | 职责 |
 | --- | --- |
-| `backend/skills/technical_support/SKILL.md` | 技术支持 Agent 的错误码、接口、配置和低风险排障规则；frontmatter 的 `agents: technical` 限定注入范围。 |
-| `backend/skills/billing_support/SKILL.md` | 账单、退款、发票和订阅处理规则；frontmatter 的 `agents: billing` 限定注入范围。 |
-| `backend/skills/general_customer_service/SKILL.md` | 通用接待、信息澄清和分流规则；frontmatter 的 `agents: general` 限定注入范围。 |
+| `backend/skills/technical/SKILL.md` | 技术支持 Agent 的错误码、接口、配置和低风险排障规则；frontmatter 的 `agents: technical` 限定注入范围。 |
+| `backend/skills/billing/SKILL.md` | 账单、退款、发票和订阅处理规则；frontmatter 的 `agents: billing` 限定注入范围。 |
+| `backend/skills/general/SKILL.md` | 通用接待、信息澄清和分流规则；frontmatter 的 `agents: general` 限定注入范围。 |
 | `backend/skills/manager.py` | 本地 Skill 递归扫描、frontmatter 解析、启用状态过滤、Agent 范围过滤和 Prompt 长度控制；不连接外部服务。 |
 | `backend/agents/agent_orchestrator.py` | BaseAgent 通过 SkillManager 动态取得本 Agent 的 Skill Prompt，并与固定 Profile mission 合并后发送给 LLM。 |
 | `backend/api/main.py` | 生命周期中创建 SkillManager 并注入四类 Agent；`/skills` 与 `/skills/reload` 保留本地扫描快照 API。 |
