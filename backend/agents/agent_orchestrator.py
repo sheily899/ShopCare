@@ -1244,6 +1244,9 @@ class ResponseComposer:
                 model=self.model,
                 max_tokens=self.max_tokens,
                 temperature=self.temperature,
+                # Why：DeepSeek 的 Anthropic 兼容接口默认可能返回 thinking block，
+                # 合成器只需要客户可见文本；关闭 thinking 可避免预算被推理块耗尽。
+                extra_body={"thinking": {"type": "disabled"}},
                 system=(
                     "只输出面向客户的中文回复。不要输出分析过程、内部 Agent 名称或未被证实的外部业务结果。"
                 ),

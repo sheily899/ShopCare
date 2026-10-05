@@ -99,6 +99,7 @@ def test_composer_parallel_success_uses_locked_parameters_and_safe_prompt(monkey
     call = client.calls[0]
     assert call["temperature"] == 0.1
     assert call["max_tokens"] == 1000
+    assert call["extra_body"] == {"thinking": {"type": "disabled"}}
     prompt = call["messages"][0]["content"]
     assert "技术结论" in prompt
     assert "账单补充" in prompt
