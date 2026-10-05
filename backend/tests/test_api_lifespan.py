@@ -63,6 +63,9 @@ def test_lifespan_mounts_core_components_and_knowledge_tool(monkeypatch):
             assert hasattr(state, name)
         assert state.ready is True
         assert set(state.agents) == {"general", "technical", "billing", "escalation"}
+        # ResponseComposer 必须复用 lifespan 创建的同一个 Anthropic client，
+        # 否则多 Agent 成功时会错误地走确定性拼接降级。
+        assert state.agent_orchestrator.composer.client is state.anthropic_client
         tool = state.tool_manager._tools["knowledge_search"]
         assert tool.cache_ttl == 300
         assert tool.supports_rerank is True

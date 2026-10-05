@@ -26,6 +26,7 @@ from agents.agent_orchestrator import (
     BillingAgent,
     EscalationAgent,
     GeneralAgent,
+    ResponseComposer,
     Request,
     TechnicalAgent,
 )
@@ -328,6 +329,12 @@ async def lifespan(app: FastAPI):
     orchestrator = AgentOrchestrator(
         agent_pool=typed_agents,
         knowledge_search=knowledge_base,
+        # Why：生命周期已创建的同一个 LLM client 必须注入合成器，避免多 Agent
+        # 成功时错误地创建空 Composer 并触发确定性降级。
+        composer=ResponseComposer(
+            client=anthropic_client,
+            model=settings["ANTHROPIC_MODEL"],
+        ),
     )
     performance_monitor = PerformanceMonitor()
     evaluator = EndToEndEvaluator(settings["EVALUATION_DATASET"])
