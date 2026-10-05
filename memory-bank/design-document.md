@@ -59,32 +59,33 @@
 ### 1.2 目录结构
 
     ShopCare/
-    ├── api/
-    │   └── main.py                 FastAPI app、lifespan、ChatRequest/Response、路由
-    ├── core/
-    │   ├── intent_recognizer.py    IntentCategory、UrgencyLevel、IntentResult、识别融合
-    │   ├── llm_utils.py            文本抽取和 JSON 解析
-    │   ├── skill_loader.py         Skill/SkillManager、热加载与 prompt 注入
-    │   └── config.py               可选；仅承载环境变量读取，不改变默认值
-    ├── agents/
-    │   ├── agent_orchestrator.py   AgentType、Request、AgentResponse、路由、并发、Composer
-    │   └── tools.py                AgentToolSpec、领域工具、共享 RAG 工具
-    ├── memory/
-    │   └── conversation_memory.py MemoryManager、Message、Redis/Chroma 读写
-    ├── mcp/
-    │   ├── knowledge_base.py      Chroma collection、切片、搜索、迁移
-    │   └── tool_manager.py        Tool、ToolResult、缓存、熔断、rewrite、rerank
-    ├── monitor/
-    │   └── performance_monitor.py Agent/tool 统计、Z-score、告警、Prometheus
-    ├── evaluation/
-    │   ├── evaluator.py            EndToEndEvaluator、LLMJudge、回归
-    │   ├── deterministic_metrics.py Golden trace 确定性指标
-    │   ├── datasets/               100 case 与冻结片段
-    │   └── run_phase2_cases.ps1    /health、/chat、trace 运行器
-    ├── tests/                      Python 单元/集成测试
-    └── frontend/                   Vue 源码、backends.js、Markdown 安全渲染
+    ├── backend/                    Python 后端工程边界
+    │   ├── api/
+    │   │   └── main.py             FastAPI app、lifespan、ChatRequest/Response、路由
+    │   ├── intent/
+    │   │   └── intent_recognizer.py IntentCategory、UrgencyLevel、IntentResult、识别融合
+    │   ├── agents/
+    │   │   ├── agent_orchestrator.py AgentType、Request、AgentResponse、路由、并发、Composer
+    │   │   └── tools.py            AgentToolSpec、领域工具、共享 RAG 工具
+    │   ├── memory/
+    │   │   └── conversation_memory.py MemoryManager、Message、Redis/Chroma 读写
+    │   ├── mcp/
+    │   │   ├── knowledge_base.py  Chroma collection、切片、搜索、迁移
+    │   │   └── tool_manager.py    Tool、ToolResult、缓存、熔断、rewrite、rerank
+    │   ├── skills/
+    │   │   ├── skill_manager.py   Skill 扫描、frontmatter 解析、热加载与 Prompt 注入
+    │   │   ├── technical/SKILL.md  技术支持领域规则
+    │   │   ├── billing/SKILL.md    账单售后领域规则
+    │   │   └── general/SKILL.md    通用客服领域规则
+    │   ├── data/knowledge/         产品知识库源文档
+    │   ├── scripts/                知识库初始化与重建脚本
+    │   └── tests/                  Python 单元/集成测试
+    ├── frontend/                   Vue 3 + Vite 源码与 Markdown 安全渲染
+    ├── memory-bank/                需求、规格、设计与施工记录
+    ├── docker-compose.yml          Redis、Chroma、Backend、Frontend 一键编排
+    └── AGENTS.md                   项目级开发与验证规则
 
-模块依赖方向必须保持：api -> agents/memory/mcp/monitor/evaluation；agents -> core/mcp；mcp 不依赖 api；monitor 只读取 orchestrator/tool_manager 公开统计；evaluation 通过 API 或 orchestrator 运行，不反向改变业务逻辑。
+模块依赖方向必须保持：backend/api -> backend/agents、intent、memory、mcp、skills；agents -> intent/mcp/skills；mcp、memory 不依赖 api；frontend 只通过 HTTP API 访问 backend；memory-bank 只保存设计与施工记录，不参与运行时导入。
 
 ## 2. 状态机与核心数据契约
 
