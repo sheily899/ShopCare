@@ -88,6 +88,7 @@ class Request:
     intent_diagnostics: Dict[str, Any] = field(default_factory=dict)
     secondary_intents: List[IntentCategory] = field(default_factory=list)
     knowledge_required: bool = False
+    sub_requests: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -649,6 +650,7 @@ async def _call_knowledge_search(
     query: str,
     top_k: int,
     request: Request,
+    domain: Optional[str] = None,
 ) -> Any:
     """执行一次可注入的知识搜索，并将同步实现移出事件循环。"""
 
@@ -665,7 +667,15 @@ async def _call_knowledge_search(
             result = await asyncio.to_thread(searcher, query, top_k=top_k)
     elif hasattr(searcher, "search"):
         # KnowledgeBase.search 是同步方法，在线程中执行，避免阻塞其他 Agent。
-        result = await asyncio.to_thread(searcher.search, query, top_k=top_k)
+        search_kwargs = {"top_k": top_k}
+        if domain:
+            search_kwargs["domain"] = domain
+        try:
+            result = await asyncio.to_thread(searcher.search, query, **search_kwargs)
+        except TypeError:
+            # 兼容旧版 KnowledgeBase 或测试替身的二参数 search 签名。
+            search_kwargs.pop("domain", None)
+            result = await asyncio.to_thread(searcher.search, query, **search_kwargs)
     else:
         raise TypeError("knowledge_search 必须是可调用对象或提供 search 方法")
     if inspect.isawaitable(result):
@@ -687,18 +697,29 @@ async def _prepare_agent_request(
     if isinstance(scoped_queries, Mapping):
         scoped_query_value = scoped_queries.get(agent_type.value, scoped_query_value)
     scoped_query = str(scoped_query_value or request.message or "")
+    domain = agent_type.value if agent_type in {
+        AgentType.GENERAL,
+        AgentType.TECHNICAL,
+        AgentType.BILLING,
+    } else None
     # Why：每个实际 Agent 固定只预检索一次且使用 top_k=5，避免重复召回和上下文膨胀。
     recall_k = 5
     started = time.perf_counter()
     try:
-        raw = await _call_knowledge_search(searcher, scoped_query, recall_k, request)
+        raw = await _call_knowledge_search(
+            searcher, scoped_query, recall_k, request, domain=domain
+        )
         success, chunks, error = _extract_retrieval_payload(raw)
     except Exception as exc:
         success, chunks, error = False, [], str(exc)
     latency_ms = max(0.0, (time.perf_counter() - started) * 1000)
     trace: Dict[str, Any] = {
         "tool_name": "search_knowledge_base",
-        "input": {"query": scoped_query, "top_k": recall_k},
+        "input": {
+            "query": scoped_query,
+            "top_k": recall_k,
+            **({"domain": domain} if domain else {}),
+        },
         "latency_ms": round(latency_ms, 3),
         "status": "success" if success else "failed",
         "retrieval_stage": "knowledge_prefetch",

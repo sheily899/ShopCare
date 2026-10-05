@@ -47,7 +47,18 @@ def test_case_metrics_cover_route_knowledge_and_safety():
     item = evaluate_case(_case(), _result())
     assert item.endpoint_success is True
     assert item.intent_route_correct is True
+    assert item.intent_correct is True
+    assert item.route_correct is True
+    assert item.knowledge_cited is True
     assert item.retrieval_hit is True
+    assert item.retrieval_recall == 1.0
+    assert item.retrieval_precision == 1.0
+    assert item.retrieval_precision_at_1 == 1.0
+    assert item.retrieval_precision_at_3 == 1.0
+    assert item.retrieval_precision_at_5 == 1.0
+    assert item.retrieval_recall_at_5 == 1.0
+    assert item.retrieval_f1 == 1.0
+    assert item.retrieval_mrr == 1.0
     assert item.knowledge_effective is True
     assert item.safety_pass is True
 
@@ -70,9 +81,22 @@ def test_compound_and_explicit_cross_domain_denominators_are_separate():
     result["response"]["supporting_agents"] = ["technical"]
     item = evaluate_case(case, result)
     assert item.compound_resolved is True
+    assert item.compound_route_correct is True
     assert item.explicit_cross_domain is True
     summary = summarize([item], [result])
     assert summary["explicit_cross_domain_denominator"] == 1
+
+
+def test_domain_intent_accepts_more_specific_sub_intent():
+    result = _result(content="排查页面错误")
+    result["response"]["intent"] = "technical_crash"
+    result["response"]["agent_type"] = "technical"
+    item = evaluate_case(
+        _case(expected_intent="technical", acceptable_intents=["technical"], expected_agent="technical"),
+        result,
+    )
+    assert item.intent_correct is True
+    assert item.route_correct is True
 
 
 def test_percentiles_are_client_round_trip_values():
@@ -84,3 +108,20 @@ def test_percentiles_are_client_round_trip_values():
 def test_cost_missing_usage_is_unavailable_not_zero():
     item = evaluate_case(_case(), _result())
     assert summarize([item], [_result()])["cost"]["status"] == "unavailable"
+
+
+def test_summary_separates_intent_route_citation_and_latency_percentiles():
+    item = evaluate_case(_case(), _result())
+    summary = summarize([item], [_result()])
+    assert summary["intent_accuracy"] == 1.0
+    assert summary["route_accuracy"] == 1.0
+    assert summary["knowledge_citation_rate"] == 1.0
+    assert summary["retrieval_recall"] == 1.0
+    assert summary["retrieval_precision"] == 1.0
+    assert summary["retrieval_precision_at_1"] == 1.0
+    assert summary["retrieval_precision_at_3"] == 1.0
+    assert summary["retrieval_precision_at_5"] == 1.0
+    assert summary["retrieval_recall_at_5"] == 1.0
+    assert summary["retrieval_f1"] == 1.0
+    assert summary["retrieval_mrr"] == 1.0
+    assert summary["client_round_trip_ms"]["p99"] == 120.0

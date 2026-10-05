@@ -981,6 +981,7 @@ async def chat(chat_request: ChatRequest) -> ChatResponse:
         intent_diagnostics=diagnostics,
         secondary_intents=list(getattr(intent_result, "secondary_intents", []) or []),
         knowledge_required=knowledge_required,
+        sub_requests=list(getattr(intent_result, "sub_requests", []) or diagnostics.get("sub_requests", []) or []),
     )
     result = await _maybe_await(app.state.agent_orchestrator.run(internal_request))
     await _safe_add_message(

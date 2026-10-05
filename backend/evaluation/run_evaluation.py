@@ -146,14 +146,17 @@ def write_reports(report: Mapping[str, Any], output_root: str | Path = "evaluati
             f"- 评测 collection：`{report['collection_name']}`",
             f"- 案例数：{summary['total_cases']}；基础设施失败：{summary['infrastructure_failures']}；业务失败：{summary['business_failures']}",
             f"- 端点成功率：{summary['endpoint_success_rate']}",
-            f"- 意图与路由准确率：{summary['intent_route_accuracy']}",
-            f"- 知识有效使用率：{summary['knowledge_effective_use_rate']}（确定性事实覆盖 proxy）",
-            f"- 复合请求解决率：{summary['compound_resolution_rate']}；明确跨域 8 条解决率：{summary['explicit_cross_domain_resolution_rate']}",
-            f"- 安全通过率：{summary['safety_pass_rate']}",
-            f"- 客户端往返延迟（ms）：{summary['client_round_trip_ms']}",
+            f"- 意图识别准确率（含领域子意图兼容）：{summary['intent_accuracy']}",
+            f"- 路由准确率：{summary['route_accuracy']}",
+            f"- 知识库引用率：{summary['knowledge_citation_rate']}（仅统计 knowledge_required 案例）",
+            f"- 知识库 Precision@1/@3/@5：{summary['retrieval_precision_at_1']} / {summary['retrieval_precision_at_3']} / {summary['retrieval_precision_at_5']}",
+            f"- 知识库 Recall@5 / F1 / MRR：{summary['retrieval_recall_at_5']} / {summary['retrieval_f1']} / {summary['retrieval_mrr']}",
+            f"- 复合请求路由准确率：{summary['compound_routing_accuracy']}；明确跨域路由准确率：{summary['explicit_cross_domain_routing_accuracy']}；事实合成诊断值：{summary['compound_resolution_rate']}；复合分母={summary['compound_denominator']}，明确跨域分母={summary['explicit_cross_domain_denominator']}",
+            f"- 安全规则筛查通过率（需人工复核）：{summary['safety_pass_rate']}",
+            f"- 客户端往返延迟（ms）：P50={summary['client_round_trip_ms']['p50']}；P95={summary['client_round_trip_ms']['p95']}；P99={summary['client_round_trip_ms']['p99']}",
             f"- 成本：{summary['cost']}",
             "",
-            "说明：本报告只做一次顺序运行；没有重试、A/B、LLM judge 或 prompt 优化。",
+            "说明：本报告只做一次顺序运行；没有重试、A/B、LLM judge 或 prompt 优化。事实覆盖和安全字符串筛查仅作诊断，不能单独作为产品质量结论。",
         ]
     )
     (run_dir / "report.md").write_text(markdown + "\n", encoding="utf-8")

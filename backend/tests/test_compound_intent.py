@@ -75,6 +75,34 @@ def test_cross_domain_technical_and_billing_request_keeps_billing_secondary() ->
         message, secondary, diagnostics["clause_matches"]
     )
     assert scoped["billing"] == "修不好怎么退货"
+    assert scoped["technical"] == "电脑开不了机"
+
+
+def test_payment_processing_clause_is_classified_as_billing_subrequest() -> None:
+    message = "页面打不开，同时我还想确认一笔支付是否处于处理中，请分别处理这两个问题。"
+
+    secondary, _, diagnostics = detect_compound_intents(
+        message, IntentCategory.TECHNICAL
+    )
+
+    assert secondary == [IntentCategory.PAYMENT_ISSUE]
+    assert diagnostics["sub_requests"][0]["domain"] == "technical"
+    assert diagnostics["sub_requests"][1]["domain"] == "billing"
+
+
+def test_compound_subrequests_create_one_scoped_query_per_business_domain() -> None:
+    message = "页面返回500，而且支付结果也没确认，请分别保留两边的待确认项。"
+    secondary, _, diagnostics = detect_compound_intents(
+        message, IntentCategory.TECHNICAL
+    )
+
+    assert secondary == [IntentCategory.PAYMENT_ISSUE]
+    queries = build_scoped_retrieval_queries(
+        message, secondary, diagnostics["clause_matches"]
+    )
+    assert set(queries) == {"technical", "billing"}
+    assert "500" in queries["technical"]
+    assert "支付" in queries["billing"]
 
 
 def test_same_domain_technical_clauses_are_not_secondary_agents() -> None:
@@ -158,3 +186,75 @@ def test_recognize_intent_clears_secondary_for_handoff(monkeypatch) -> None:
     assert result.intent is IntentCategory.HUMAN_HANDOFF
     assert result.secondary_intents == []
     assert result.compound_trigger == ""
+
+
+def test_low_confidence_compound_message_uses_first_specific_subrequest_as_primary(monkeypatch) -> None:
+    async def fake_llm(message, history=None):
+        return _llm(IntentCategory.OTHER, confidence=0.2)
+
+    async def fake_embedding(message):
+        return _embedding(IntentCategory.OTHER, score=0.1)
+
+    monkeypatch.setattr(recognizer, "_recognize_with_llm", fake_llm)
+    monkeypatch.setattr(recognizer, "_recognize_with_embedding", fake_embedding)
+    monkeypatch.setattr(
+        recognizer,
+        "_pattern_recognize",
+        lambda message: _pattern(IntentCategory.OTHER, confidence=0.0),
+    )
+
+    result = _run(
+        recognize_intent("页面打不开，同时支付是否处于处理中，请分别处理")
+    )
+
+    assert result.intent is IntentCategory.TECHNICAL
+    assert result.secondary_intents == [IntentCategory.PAYMENT_ISSUE]
+    assert result.intent_diagnostics["compound_detected"] is True
+
+
+def test_valid_llm_sub_requests_enable_domain_scoped_queries_without_connector(monkeypatch) -> None:
+    async def fake_llm(message, history=None):
+        return LLMIntentResult(
+            intent=IntentCategory.TECHNICAL,
+            confidence=0.9,
+            reasoning="两个独立业务问题",
+            success=True,
+            diagnostics={
+                "llm_is_compound": True,
+                "llm_sub_requests": [
+                    {
+                        "id": "a",
+                        "text": "登录时报错",
+                        "domain": "technical",
+                        "intent": IntentCategory.TECHNICAL_LOGIN.value,
+                        "confidence": 0.9,
+                    },
+                    {
+                        "id": "b",
+                        "text": "申请退款",
+                        "domain": "billing",
+                        "intent": IntentCategory.REFUND.value,
+                        "confidence": 0.9,
+                    },
+                ],
+            },
+        )
+
+    monkeypatch.setattr(recognizer, "_recognize_with_llm", fake_llm)
+    async def fake_embedding(message):
+        return _embedding(IntentCategory.TECHNICAL, score=0.9)
+
+    monkeypatch.setattr(recognizer, "_recognize_with_embedding", fake_embedding)
+    monkeypatch.setattr(
+        recognizer,
+        "_pattern_recognize",
+        lambda message: _pattern(IntentCategory.TECHNICAL, confidence=0.8),
+    )
+
+    result = _run(recognize_intent("登录时报错 申请退款"))
+
+    assert result.secondary_intents == [IntentCategory.REFUND]
+    assert result.intent_diagnostics["scoped_retrieval_queries"] == {
+        "technical": "登录时报错",
+        "billing": "申请退款",
+    }

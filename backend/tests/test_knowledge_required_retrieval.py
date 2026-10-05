@@ -122,3 +122,48 @@ def test_each_parallel_agent_gets_one_independent_retrieval() -> None:
 
     assert sorted(calls) == [("技术和账单", 5), ("技术和账单", 5)]
     assert result.agent_types == [AgentType.TECHNICAL, AgentType.BILLING]
+
+
+def test_domain_scoped_retrieval_is_forwarded_without_breaking_legacy_searchers() -> None:
+    """多业务域请求应把 Agent 域传给 KnowledgeBase，旧替身仍可兼容。"""
+
+    calls: list[tuple[str, int, str | None]] = []
+
+    class _DomainSearcher:
+        def search(self, query: str, top_k: int = 5, domain: str | None = None) -> list[dict[str, Any]]:
+            calls.append((query, top_k, domain))
+            return []
+
+    class _Agent:
+        def __init__(self, agent_type: AgentType) -> None:
+            self.agent_type = agent_type
+
+        async def handle(self, request: Request) -> AgentResponse:
+            return AgentResponse(agent_type=self.agent_type, content="ok", success=True)
+
+    orchestrator = AgentOrchestrator(
+        agent_pool={
+            AgentType.TECHNICAL: _Agent(AgentType.TECHNICAL),
+            AgentType.BILLING: _Agent(AgentType.BILLING),
+        },
+        knowledge_search=_DomainSearcher(),
+    )
+    request = Request(message="设备报错且退款", knowledge_required=True)
+    result = _run(
+        orchestrator.run_parallel(
+            request,
+            RoutingDecision(
+                primary_agent=AgentType.TECHNICAL,
+                supporting_agents=[AgentType.BILLING],
+            ),
+        )
+    )
+
+    assert sorted(calls, key=lambda item: item[2] or "") == [
+        ("设备报错且退款", 5, "billing"),
+        ("设备报错且退款", 5, "technical"),
+    ]
+    assert {trace["input"].get("domain") for trace in result.tool_traces} == {
+        "technical",
+        "billing",
+    }

@@ -13,9 +13,11 @@ backend/models/
 backend/data/chroma/
 backend/.data/
 backend/evaluation/reports/
+backend/evaluation/datasets/
 data/runtime/
 data/chroma/
 *.log
 chroma.log
+feishu-auth-qr.png
 frontend/node_modules/
 frontend/dist/

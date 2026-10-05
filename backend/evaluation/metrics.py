@@ -45,6 +45,14 @@ def _all_facts_match(facts: Any, response: str) -> tuple[bool, float]:
     return matched == len(values), matched / len(values)
 
 
+def _intent_matches(expected: str, actual: str) -> bool:
+    """允许数据集的领域级意图匹配产品返回的更细粒度子意图。"""
+
+    expected = str(expected or "")
+    actual = str(actual or "")
+    return bool(expected and actual and (expected == actual or actual.startswith(expected + "_")))
+
+
 def _sensitive_request_detected(item: Any, response: str) -> bool:
     """只把主动索取敏感信息判为风险，避免把安全拒绝说明误判为索取。"""
 
@@ -94,10 +102,22 @@ class CaseEvaluation:
     status: str
     endpoint_success: bool
     intent_route_correct: Optional[bool]
+    intent_correct: Optional[bool]
+    route_correct: Optional[bool]
+    knowledge_cited: Optional[bool]
     knowledge_effective: Optional[bool]
     retrieval_hit: Optional[bool]
+    retrieval_recall: Optional[float]
+    retrieval_precision: Optional[float]
+    retrieval_precision_at_1: Optional[float]
+    retrieval_precision_at_3: Optional[float]
+    retrieval_precision_at_5: Optional[float]
+    retrieval_recall_at_5: Optional[float]
+    retrieval_f1: Optional[float]
+    retrieval_mrr: Optional[float]
     required_fact_coverage: Optional[float]
     compound_resolved: Optional[bool]
+    compound_route_correct: Optional[bool]
     explicit_cross_domain: bool
     safety_pass: Optional[bool]
     latency_ms: Optional[float]
@@ -126,9 +146,30 @@ def evaluate_case(case: Mapping[str, Any], result: Mapping[str, Any]) -> CaseEva
     latency_ms = float(latency) if isinstance(latency, (int, float)) else None
     if status == "infrastructure_failure":
         return CaseEvaluation(
-            case_id, status, False, None, None, None, None, None,
-            bool(case.get("expected_secondary_intents")), None, latency_ms,
-            str(result.get("error") or "infrastructure failure"),
+            case_id=case_id,
+            status=status,
+            endpoint_success=False,
+            intent_route_correct=None,
+            intent_correct=None,
+            route_correct=None,
+            knowledge_cited=None,
+            knowledge_effective=None,
+            retrieval_hit=None,
+            retrieval_recall=None,
+            retrieval_precision=None,
+            retrieval_precision_at_1=None,
+            retrieval_precision_at_3=None,
+            retrieval_precision_at_5=None,
+            retrieval_recall_at_5=None,
+            retrieval_f1=None,
+            retrieval_mrr=None,
+            required_fact_coverage=None,
+            compound_resolved=None,
+            compound_route_correct=None,
+            explicit_cross_domain=bool(case.get("expected_secondary_intents")),
+            safety_pass=None,
+            latency_ms=latency_ms,
+            failure_reason=str(result.get("error") or "infrastructure failure"),
         )
 
     response = result.get("response") if isinstance(result.get("response"), Mapping) else {}
@@ -138,29 +179,61 @@ def evaluate_case(case: Mapping[str, Any], result: Mapping[str, Any]) -> CaseEva
     actual_intent = str(response.get("intent") or "")
     expected_agent = str(case.get("expected_agent") or "")
     actual_agent = str(response.get("agent_type") or "")
-    route_ok = bool(actual_intent in expected_intents and actual_agent == expected_agent)
+    intent_ok = any(_intent_matches(expected, actual_intent) for expected in expected_intents)
+    route_ok = bool(actual_agent == expected_agent)
+    intent_route_ok = bool(intent_ok and route_ok)
 
     knowledge_required = bool(case.get("knowledge_required"))
     retrieved_ids = _retrieved_chunk_ids(result)
     expected_chunks = {str(item) for item in (case.get("expected_retrieval_chunks") or [])}
     forbidden_chunks = {str(item) for item in (case.get("must_not_use_chunks") or [])}
     retrieval_hit = None
+    retrieval_recall = None
+    retrieval_precision = None
+    retrieval_precision_at_1 = None
+    retrieval_precision_at_3 = None
+    retrieval_precision_at_5 = None
+    retrieval_recall_at_5 = None
+    retrieval_f1 = None
+    retrieval_mrr = None
+    knowledge_cited = None
     knowledge_effective = None
     fact_coverage = None
     if knowledge_required:
-        retrieval_hit = bool(expected_chunks.intersection(retrieved_ids)) if expected_chunks else bool(retrieved_ids)
+        unique_retrieved = list(dict.fromkeys(retrieved_ids))
+        hits = [chunk_id for chunk_id in unique_retrieved if chunk_id in expected_chunks]
+        retrieval_hit = bool(hits) if expected_chunks else bool(unique_retrieved)
+        if expected_chunks:
+            retrieval_recall = len(set(hits)) / len(expected_chunks)
+            retrieval_precision = len(set(hits)) / len(unique_retrieved) if unique_retrieved else 0.0
+            def precision_at(k: int) -> float:
+                denominator = min(k, len(unique_retrieved))
+                return len(set(unique_retrieved[:k]).intersection(expected_chunks)) / denominator if denominator else 0.0
+            retrieval_precision_at_1 = precision_at(1)
+            retrieval_precision_at_3 = precision_at(3)
+            retrieval_precision_at_5 = precision_at(5)
+            retrieval_recall_at_5 = len(set(unique_retrieved[:5]).intersection(expected_chunks)) / len(expected_chunks)
+            if retrieval_recall + retrieval_precision:
+                retrieval_f1 = 2 * retrieval_recall * retrieval_precision / (retrieval_recall + retrieval_precision)
+            retrieval_mrr = next(
+                (1.0 / index for index, chunk_id in enumerate(unique_retrieved, start=1) if chunk_id in expected_chunks),
+                0.0,
+            )
         forbidden_ok = not forbidden_chunks.intersection(retrieved_ids)
         _, fact_coverage = _all_facts_match(case.get("required_facts"), content)
-        knowledge_effective = bool(response.get("knowledge_used")) and retrieval_hit and forbidden_ok and fact_coverage == 1.0
+        knowledge_cited = bool(response.get("knowledge_used"))
+        knowledge_effective = knowledge_cited and retrieval_hit and forbidden_ok and fact_coverage == 1.0
 
     compound = case.get("compound") or {}
     is_compound = bool(compound.get("is_compound"))
     compound_resolved = None
+    compound_route_correct = None
     explicit_cross_domain = bool(case.get("expected_secondary_intents"))
     if is_compound:
         expected_supporting = {str(item) for item in (case.get("expected_supporting_agents") or [])}
         actual_supporting = {str(item) for item in (response.get("supporting_agents") or [])}
         supporting_ok = not expected_supporting or expected_supporting.issubset(actual_supporting)
+        compound_route_correct = bool(endpoint_success and route_ok and supporting_ok)
         _, compound_fact_coverage = _all_facts_match(case.get("required_facts"), content)
         compound_resolved = supporting_ok and compound_fact_coverage == 1.0 and endpoint_success
 
@@ -177,8 +250,12 @@ def evaluate_case(case: Mapping[str, Any], result: Mapping[str, Any]) -> CaseEva
     if not endpoint_success:
         status = "business_failure"
     return CaseEvaluation(
-        case_id, status, endpoint_success, route_ok, knowledge_effective,
-        retrieval_hit, fact_coverage, compound_resolved, explicit_cross_domain,
+        case_id, status, endpoint_success, intent_route_ok, intent_ok, route_ok,
+        knowledge_cited, knowledge_effective, retrieval_hit, retrieval_recall,
+        retrieval_precision, retrieval_precision_at_1, retrieval_precision_at_3,
+        retrieval_precision_at_5, retrieval_recall_at_5, retrieval_f1, retrieval_mrr,
+        fact_coverage,
+        compound_resolved, compound_route_correct, explicit_cross_domain,
         safety_pass, latency_ms, str(result.get("error") or ""),
     )
 
@@ -213,9 +290,13 @@ def summarize(evaluations: Sequence[CaseEvaluation], raw_results: Sequence[Mappi
         return round(sum(1 for item in items if predicate(item)) / len(items), 4) if items else None
 
     compound = [item for item in completed if item.compound_resolved is not None]
+    compound_routes = [item for item in completed if item.compound_route_correct is not None]
     cross_domain = [item for item in compound if item.explicit_cross_domain]
-    knowledge = [item for item in completed if item.knowledge_effective is not None]
+    knowledge = [item for item in completed if item.knowledge_cited is not None]
     retrieval = [item for item in completed if item.retrieval_hit is not None]
+    retrieval_with_expected = [item for item in completed if item.retrieval_recall is not None]
+    intents = [item for item in completed if item.intent_correct is not None]
+    routes = [item for item in completed if item.route_correct is not None]
     safety = [item for item in completed if item.safety_pass is not None]
     latencies = [item.latency_ms for item in evaluations if item.latency_ms is not None]
     usage = []
@@ -229,10 +310,26 @@ def summarize(evaluations: Sequence[CaseEvaluation], raw_results: Sequence[Mappi
         "infrastructure_failures": len(infra),
         "business_failures": sum(1 for item in completed if not item.endpoint_success),
         "endpoint_success_rate": ratio(evaluations, lambda item: item.endpoint_success),
+        "intent_accuracy": ratio(intents, lambda item: bool(item.intent_correct)),
+        "route_accuracy": ratio(routes, lambda item: bool(item.route_correct)),
         "intent_route_accuracy": ratio(completed, lambda item: bool(item.intent_route_correct)),
+        "knowledge_citation_rate": ratio(knowledge, lambda item: bool(item.knowledge_cited)),
         "knowledge_effective_use_rate": ratio(knowledge, lambda item: bool(item.knowledge_effective)),
         "retrieval_chunk_hit_rate": ratio(retrieval, lambda item: bool(item.retrieval_hit)),
+        "retrieval_recall": round(sum(item.retrieval_recall or 0.0 for item in retrieval_with_expected) / len(retrieval_with_expected), 4) if retrieval_with_expected else None,
+        "retrieval_precision": round(sum(item.retrieval_precision or 0.0 for item in retrieval_with_expected) / len(retrieval_with_expected), 4) if retrieval_with_expected else None,
+        "retrieval_precision_at_1": round(sum(item.retrieval_precision_at_1 or 0.0 for item in retrieval_with_expected) / len(retrieval_with_expected), 4) if retrieval_with_expected else None,
+        "retrieval_precision_at_3": round(sum(item.retrieval_precision_at_3 or 0.0 for item in retrieval_with_expected) / len(retrieval_with_expected), 4) if retrieval_with_expected else None,
+        "retrieval_precision_at_5": round(sum(item.retrieval_precision_at_5 or 0.0 for item in retrieval_with_expected) / len(retrieval_with_expected), 4) if retrieval_with_expected else None,
+        "retrieval_recall_at_5": round(sum(item.retrieval_recall_at_5 or 0.0 for item in retrieval_with_expected) / len(retrieval_with_expected), 4) if retrieval_with_expected else None,
+        "retrieval_f1": round(sum(item.retrieval_f1 or 0.0 for item in retrieval_with_expected) / len(retrieval_with_expected), 4) if retrieval_with_expected else None,
+        "retrieval_mrr": round(sum(item.retrieval_mrr or 0.0 for item in retrieval_with_expected) / len(retrieval_with_expected), 4) if retrieval_with_expected else None,
         "compound_resolution_rate": ratio(compound, lambda item: bool(item.compound_resolved)),
+        "compound_routing_accuracy": ratio(compound_routes, lambda item: bool(item.compound_route_correct)),
+        "explicit_cross_domain_routing_accuracy": ratio(
+            [item for item in compound_routes if item.explicit_cross_domain],
+            lambda item: bool(item.compound_route_correct),
+        ),
         "explicit_cross_domain_resolution_rate": ratio(cross_domain, lambda item: bool(item.compound_resolved)),
         "compound_denominator": len(compound),
         "explicit_cross_domain_denominator": len(cross_domain),
@@ -240,6 +337,7 @@ def summarize(evaluations: Sequence[CaseEvaluation], raw_results: Sequence[Mappi
         "client_round_trip_ms": {
             "p50": percentile(latencies, 0.50),
             "p95": percentile(latencies, 0.95),
+            "p99": percentile(latencies, 0.99),
             "max": round(max(latencies), 3) if latencies else None,
         },
         "cost": {
@@ -248,7 +346,9 @@ def summarize(evaluations: Sequence[CaseEvaluation], raw_results: Sequence[Mappi
             "note": "仅在 API 响应提供 usage.total_tokens 时统计；缺失不记为 0。",
         },
         "method": {
-            "fact_coverage": "deterministic substring proxy",
+            "fact_coverage": "diagnostic only; deterministic substring proxy",
+            "knowledge_citation": "response.knowledge_used among knowledge_required cases",
+            "retrieval_metrics": "Precision@1/@3/@5 and Recall@5 use the ranked unique retrieved list; legacy all-list values retained for diagnostics",
             "latency": "client round-trip measured by perf_counter",
             "compound_denominator": len(compound),
             "explicit_cross_domain_denominator": len(cross_domain),

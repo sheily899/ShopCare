@@ -17,7 +17,7 @@ import math
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -87,6 +87,20 @@ class IntentResult:
     secondary_intents: List[IntentCategory] = field(default_factory=list)
     compound_trigger: str = ""
     intent_diagnostics: Dict[str, Any] = field(default_factory=dict)
+    sub_requests: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CompoundSubRequest:
+    """一个可独立路由、检索和回答的业务子请求。"""
+
+    id: str
+    text: str
+    domain: str
+    intent: IntentCategory
+    confidence: float
+    entities: Dict[str, List[str]] = field(default_factory=dict)
+    knowledge_required: bool = True
 
 
 @dataclass
@@ -203,6 +217,26 @@ CLASSIFY_INTENT_TOOL: Dict[str, Any] = {
                 "type": "string",
                 "description": "简要陈述判定该意图的理由。",
             },
+            "is_compound": {
+                "type": "boolean",
+                "description": "当前消息是否包含两个或以上可独立处理的业务子请求。",
+            },
+            "sub_requests": {
+                "type": "array",
+                "description": "复合消息的业务子请求，每个子请求只属于一个业务域。",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "text": {"type": "string"},
+                        "domain": {"type": "string", "enum": ["general", "technical", "billing"]},
+                        "intent": {"type": "string", "enum": [category.value for category in IntentCategory]},
+                        "confidence": {"type": "number"},
+                    },
+                    "required": ["id", "text", "domain", "intent", "confidence"],
+                    "additionalProperties": False,
+                },
+            },
         },
         "required": ["intent", "confidence", "reasoning"],
         "additionalProperties": False,
@@ -214,6 +248,7 @@ _INTENT_TOOL = CLASSIFY_INTENT_TOOL
 DEFAULT_LLM_MODEL = "claude-3-5-sonnet-20241022"
 _LLM_SYSTEM_PROMPT = """你是 ShopCare 的电商客服意图分析器。
 请根据用户当前消息和可选的最近会话上下文，选择最具体的一个意图。
+如果消息包含多个可独立处理的业务问题，请同时返回 is_compound=true 和 sub_requests；每个子请求必须拆成独立文本，并只归属 general、technical、billing 三个业务域之一。
 必须调用 classify_intent 工具，不要输出自由文本 JSON。
 intent 必须使用工具 schema 中的枚举值，confidence 必须是数字，reasoning 说明最直接的判定依据。
 退款、发票、登录故障、崩溃、物流和人工请求优先使用对应的细粒度意图，不要用宽泛类别替代。"""
@@ -357,9 +392,10 @@ async def _recognize_with_llm(
             raise ValueError(f"未收到有效的 {_INTENT_TOOL_NAME} 工具调用")
 
         expected_fields = {"intent", "confidence", "reasoning"}
+        allowed_fields = expected_fields | {"is_compound", "sub_requests"}
         payload_fields = set(payload)
         missing = expected_fields - payload_fields
-        extra = payload_fields - expected_fields
+        extra = payload_fields - allowed_fields
         if missing:
             raise ValueError(f"工具返回缺少必填字段: {sorted(missing)}")
         if extra:
@@ -388,6 +424,9 @@ async def _recognize_with_llm(
             raise ValueError("工具返回的 reasoning 为空或不是字符串")
 
         diagnostics: Dict[str, Any] = {}
+        if isinstance(payload.get("sub_requests"), list):
+            diagnostics["llm_sub_requests"] = payload["sub_requests"]
+            diagnostics["llm_is_compound"] = bool(payload.get("is_compound"))
         if confidence != numeric_confidence:
             diagnostics["confidence_clamped"] = True
         return LLMIntentResult(
@@ -645,6 +684,11 @@ SPECIFIC_PATTERNS: Dict[IntentCategory, Tuple[str, ...]] = {
         "重复扣款",
         "多扣",
         "支付失败",
+        "支付状态",
+        "支付结果",
+        "支付处理中",
+        "处于处理中",
+        "处理中",
         "扣费",
         r"\bpayment\s+failed\b",
         r"\bpayment\s+declined\b",
@@ -1058,6 +1102,12 @@ _COMPOUND_TECHNICAL_PATTERNS: Tuple[str, ...] = (
     "无法开机",
     "屏幕花屏",
     "花屏",
+    "页面打不开",
+    "网络请求失败",
+    "页面返回500",
+    "页面报500",
+    "错误码401",
+    "错误码403",
 )
 
 
@@ -1208,6 +1258,7 @@ def detect_compound_intents(
         "clause_matches": [],
         "clause_intents": [],
         "compound_detected": len(clauses) >= 2,
+        "sub_requests": [],
     }
     if len(clauses) < 2:
         return [], "", diagnostics
@@ -1222,11 +1273,23 @@ def detect_compound_intents(
             "intent": candidate["intent"].value,
             "domain": _intent_domain(candidate["intent"]),
             "match": candidate["match"],
+            "specific": bool(candidate["specific"]),
         }
         clause_matches.append(record)
 
     diagnostics["clause_matches"] = clause_matches
     diagnostics["clause_intents"] = [item["intent"] for item in clause_matches]
+    diagnostics["sub_requests"] = [
+        {
+            "id": f"sub_{index}",
+            "text": item["clause"],
+            "domain": item["domain"],
+            "intent": item["intent"],
+            "confidence": 0.75 if item["specific"] else 0.55,
+            "knowledge_required": item["domain"] != "general",
+        }
+        for index, item in enumerate(clause_matches, start=1)
+    ]
     primary_domain = _intent_domain(primary_intent)
     secondary: List[IntentCategory] = []
     for item in clause_matches:
@@ -1243,6 +1306,8 @@ def detect_compound_intents(
     if not secondary:
         diagnostics["compound_detected"] = False
     diagnostics["secondary_intents"] = [intent.value for intent in secondary]
+    if diagnostics["sub_requests"]:
+        diagnostics["primary_sub_request_id"] = diagnostics["sub_requests"][0]["id"]
     return secondary, trigger, diagnostics
 
 
@@ -1279,24 +1344,103 @@ def build_scoped_retrieval_queries(
         以业务域为 key 的 scoped retrieval query 字典。
     """
     text = message or ""
-    if not secondary_intents:
+    if not secondary_intents and not clause_matches:
         return {"default": text}
     matches = clause_matches or []
     queries: Dict[str, List[str]] = {}
-    target_intents = set(secondary_intents)
     for item in matches:
         intent = _coerce_intent(item.get("intent"))
-        if intent in target_intents:
-            queries.setdefault(_intent_domain(intent), []).append(item["clause"])
+        domain = _intent_domain(intent)
+        queries.setdefault(domain, []).append(item["clause"])
     return {
         domain: "；".join(dict.fromkeys(clauses))
         for domain, clauses in queries.items()
     } or {"default": text}
 
 
+def _normalize_structured_sub_requests(value: Any) -> List[Dict[str, Any]]:
+    """校验 LLM 返回的复合子请求，非法项整体丢弃而不影响主链路。"""
+
+    if not isinstance(value, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for index, item in enumerate(value, start=1):
+        if not isinstance(item, Mapping):
+            continue
+        text = str(item.get("text") or "").strip()
+        domain = str(item.get("domain") or "").strip().lower()
+        intent = _coerce_intent(item.get("intent"))
+        if not text or domain not in {"general", "technical", "billing"}:
+            continue
+        if _intent_domain(intent) != domain:
+            continue
+        try:
+            confidence = _bounded_score(float(item.get("confidence", 0.0)))
+        except (TypeError, ValueError):
+            continue
+        normalized.append(
+            {
+                "id": str(item.get("id") or f"llm_sub_{index}"),
+                "text": text,
+                "domain": domain,
+                "intent": intent.value,
+                "confidence": confidence,
+                "knowledge_required": domain != "general",
+            }
+        )
+    return normalized
+
+
+def _resolve_structured_compound(
+    message: str,
+    primary_intent: IntentCategory,
+    sub_requests: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """把经过校验的 LLM 子请求转换为统一的复合意图诊断结构。"""
+
+    primary_domain = _intent_domain(primary_intent)
+    secondary: List[IntentCategory] = []
+    clause_matches: List[Dict[str, Any]] = []
+    for item in sub_requests:
+        intent = _coerce_intent(item["intent"])
+        clause_matches.append(
+            {
+                "clause": item["text"],
+                "intent": intent.value,
+                "domain": item["domain"],
+                "match": "llm_structured",
+                "specific": True,
+            }
+        )
+        if intent is IntentCategory.HUMAN_HANDOFF:
+            continue
+        if intent is not primary_intent and item["domain"] != primary_domain and intent not in secondary:
+            secondary.append(intent)
+    diagnostics = {
+        "terminal_handoff": False,
+        "clauses": [item["text"] for item in sub_requests],
+        "clause_matches": clause_matches,
+        "clause_intents": [item["intent"] for item in sub_requests],
+        "compound_detected": len(sub_requests) >= 2,
+        "secondary_intents": [intent.value for intent in secondary[:3]],
+        "sub_requests": sub_requests,
+        "primary_sub_request_id": sub_requests[0]["id"],
+    }
+    diagnostics["scoped_retrieval_queries"] = build_scoped_retrieval_queries(
+        message, secondary, clause_matches
+    )
+    return {
+        "secondary_intents": secondary[:3],
+        "compound_trigger": "llm_structured",
+        "scoped_retrieval_queries": diagnostics["scoped_retrieval_queries"],
+        "diagnostics": diagnostics,
+    }
+
+
 def resolve_compound_intents(
     message: str,
     primary_intent: IntentCategory,
+    structured_sub_requests: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """完成复合意图识别并装配 scoped retrieval 诊断。
 
@@ -1307,6 +1451,10 @@ def resolve_compound_intents(
     Returns:
         包含辅助意图、触发词、scoped query 与完整诊断的字典。
     """
+    if structured_sub_requests and len(structured_sub_requests) >= 2:
+        return _resolve_structured_compound(
+            message, primary_intent, structured_sub_requests
+        )
     secondary, trigger, diagnostics = detect_compound_intents(message, primary_intent)
     diagnostics["scoped_retrieval_queries"] = build_scoped_retrieval_queries(
         message, secondary, diagnostics.get("clause_matches")
@@ -1531,6 +1679,8 @@ async def recognize_intent(
         },
         "fallback": "",
     }
+    if llm.diagnostics:
+        diagnostics.update(llm.diagnostics)
 
     final_intent = IntentCategory.OTHER
     final_confidence = 0.0
@@ -1596,7 +1746,38 @@ async def recognize_intent(
     normalized_confidence = _bounded_score(round(final_confidence, 6))
     diagnostics["final_confidence"] = normalized_confidence
 
-    compound = resolve_compound_intents(message, final_intent)
+    structured_sub_requests = _normalize_structured_sub_requests(
+        llm.diagnostics.get("llm_sub_requests")
+    ) if llm.success and llm.diagnostics.get("llm_is_compound") else []
+    compound = resolve_compound_intents(message, final_intent, structured_sub_requests)
+    # 复合消息若融合结果退化为 OTHER，优先使用第一个明确业务子请求作为主路由，
+    # 再按该主域重新计算 secondary，避免整条请求直接进入澄清分支。
+    if final_intent in {
+        IntentCategory.OTHER,
+        IntentCategory.QUERY,
+        IntentCategory.REQUEST,
+    } and compound["diagnostics"].get("compound_detected"):
+        sub_requests = compound["diagnostics"].get("sub_requests") or []
+        if sub_requests:
+            candidate_intent = _coerce_intent(sub_requests[0].get("intent"))
+            if candidate_intent not in {
+                IntentCategory.OTHER,
+                IntentCategory.HUMAN_HANDOFF,
+            }:
+                final_intent = candidate_intent
+                final_confidence = max(
+                    normalized_confidence,
+                    float(sub_requests[0].get("confidence") or 0.55),
+                )
+                normalized_confidence = _bounded_score(round(final_confidence, 6))
+                diagnostics["final_intent"] = final_intent.value
+                diagnostics["final_confidence"] = normalized_confidence
+                diagnostics["compound_primary_fallback"] = candidate_intent.value
+                compound = resolve_compound_intents(
+                    message,
+                    final_intent,
+                    structured_sub_requests,
+                )
     diagnostics.update(compound["diagnostics"])
     diagnostics["scoped_retrieval_queries"] = compound["scoped_retrieval_queries"]
 
@@ -1624,4 +1805,5 @@ async def recognize_intent(
         secondary_intents=compound["secondary_intents"],
         compound_trigger=compound["compound_trigger"],
         intent_diagnostics=diagnostics,
+        sub_requests=list(compound["diagnostics"].get("sub_requests") or []),
     )

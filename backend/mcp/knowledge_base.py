@@ -591,12 +591,19 @@ class KnowledgeBase:
         )
         return len(ids)
 
-    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        domain: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """执行基础 Chroma 向量检索并返回稳定 chunk 身份。
 
         Args:
             query: 用户检索文本。
             top_k: 最多返回的结果数。
+            domain: 可选业务域过滤。仅在切片带有 ``domain`` 元数据时生效；
+                旧知识库没有该字段时自动回退到全库检索，保持兼容。
 
         Returns:
             包含 ``title``、``content``、``score``、``id``、``runtime_id`` 和
@@ -605,11 +612,24 @@ class KnowledgeBase:
         bounded_top_k = max(0, int(top_k))
         if bounded_top_k == 0:
             return []
-        results = self._collection.query(
-            query_texts=[str(query or "")],
-            n_results=bounded_top_k,
-            include=["documents", "metadatas", "distances"],
-        )
+        query_kwargs = {
+            "query_texts": [str(query or "")],
+            "n_results": bounded_top_k,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        results = None
+        if domain:
+            try:
+                filtered = self._collection.query(**query_kwargs, where={"domain": domain})
+                # If the collection predates domain metadata, Chroma returns no
+                # rows. Keep the domain hint best-effort instead of hiding all
+                # product knowledge from the agent.
+                if self._first_nested(filtered.get("documents")):
+                    results = filtered
+            except Exception:
+                logger.debug("业务域过滤不可用，回退到全库检索: domain=%s", domain, exc_info=True)
+        if results is None:
+            results = self._collection.query(**query_kwargs)
         documents = self._first_nested(results.get("documents"))
         metadatas = self._first_nested(results.get("metadatas"))
         distances = self._first_nested(results.get("distances"))
