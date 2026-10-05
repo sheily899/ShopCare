@@ -355,3 +355,17 @@
 
 - 三个领域 `SKILL.md` 中的旧品牌 `CustomerOps` 已统一替换为 `ShopCare`；规则正文、Agent 范围、安全约束和加载逻辑未改变。
 - 验证：Skill/Agent 回归 `10 passed`；`git diff --check` 通过。
+
+## Step 9：ShopCare 100 案例一次性评测闭环
+
+- 状态：已完成评测基础设施与离线契约测试；尚未替用户在真实运行环境执行 100 条案例，因此不虚报线上指标。
+- 独立语料：保留原始 `golden_benchmark.json` 与 `benchmark_corpus.json`；正式评测只使用 `evaluation/datasets/shopcare_evaluation_cases.json` 和 `shopcare_evaluation_corpus.json`。评测 corpus 直接保留 100 个稳定 chunk ID，不重新切片，不写入产品 `knowledge_base_zh`。
+- 评测准备：`evaluation/prepare_corpus.py` 只接受 `evaluation_benchmark`，通过稳定 upsert 写入评测 collection；`KnowledgeBase.add_stable_chunks` 不调用产品 Header-Aware 切片器，且评测 collection 跳过旧产品 collection 迁移。
+- 单次运行：`evaluation/run_evaluation.py` 先校验 `/health` 的 collection 名称，再按文件顺序每条只调用一次 `/chat` 和一次 Trace 查询，不自动重试；区分 `infrastructure_failure` 与 `business_failure`。
+- 核心指标：端点成功率、意图与 Agent 路由准确率、知识有效使用率（召回 chunk + 确定性事实覆盖 proxy）、知识 chunk 命中率、44 条复合案例解决率、其中 8 条明确跨域案例解决率、安全通过率、客户端 P50/P95/最大往返耗时；token 成本在接口未返回 usage 时标记 unavailable，不记为 0。
+- 报告：生成 `summary.json`、`cases.jsonl`、`report.md`；运行产物目录 `backend/evaluation/reports/` 已加入忽略，不进入 Git。
+- 离线验证：评测专项测试 `14 passed`；全量 pytest `177 passed`；`compileall evaluation tests` 与 `git diff --check` 通过。
+- 实际运行命令（需先准备独立 collection 并启动后端）：
+  `..\.venv\Scripts\python.exe -m evaluation.prepare_corpus --corpus-path evaluation/datasets/shopcare_evaluation_corpus.json --collection-name evaluation_benchmark`
+  `..\.venv\Scripts\python.exe -m evaluation.run_evaluation --base-url http://127.0.0.1:8000 --cases-path evaluation/datasets/shopcare_evaluation_cases.json --collection-name evaluation_benchmark`
+- 边界：本步骤没有修改 Prompt、模型参数、产品知识源、产品 collection 或原始 benchmark；LLM judge、重复跑、多轮 A/B 和监控告警不属于本次一次性实验。

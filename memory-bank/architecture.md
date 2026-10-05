@@ -429,5 +429,30 @@ backend/skills/*/SKILL.md
 
 - Skill 文本只作为领域规则提示，不改变 Agent 工具白名单，也不绕过已有的外部业务安全边界。
 - SkillManager 采用标准库解析简单 frontmatter，避免新增未锁定 YAML 依赖。
+
+## Step 9：独立评测与报告边界
+
+| 文件 | 职责 |
+| --- | --- |
+| `backend/evaluation/datasets/shopcare_evaluation_cases.json` | 100 条与当前 ShopCare 接口字段、意图、Agent、知识门控和安全约束对齐的正式案例；保留 44 条复合案例和 8 条明确跨域案例标记。 |
+| `backend/evaluation/datasets/shopcare_evaluation_corpus.json` | 100 个稳定评测知识片段；只用于 `evaluation_benchmark`，不进入 `knowledge_base_zh`，不经过产品切片器重新切割。 |
+| `backend/evaluation/corpus.py` | 评测文件校验、collection 隔离、稳定 metadata/upsert 辅助。 |
+| `backend/evaluation/prepare_corpus.py` | 评测 collection 准备命令；固定拒绝产品 collection，并要求完整 100 个稳定片段。 |
+| `backend/evaluation/metrics.py` | 无 LLM judge 的确定性单案例判定与核心业务指标汇总；事实覆盖明确标为 substring proxy。 |
+| `backend/evaluation/run_evaluation.py` | 一次性顺序调用 `/health`、100 次 `/chat` 和对应 Trace 查询，区分基础设施失败与业务失败并输出三份报告。 |
+| `backend/tests/test_evaluation_*.py` | 使用 fake Chroma/HTTP 验证 corpus 身份、指标口径、复合/跨域分母、无重试和报告文件契约。 |
+
+评测数据流：
+
+```text
+shopcare_evaluation_corpus.json
+  -> evaluation_benchmark（稳定 upsert，跳过 legacy migration）
+  -> /health collection preflight
+  -> 100 x /chat + /trace/tool/{request_id}
+  -> deterministic metrics
+  -> summary.json / cases.jsonl / report.md
+```
+
+评测只报告一次运行结果，不将客户端延迟、token usage 或网络重试波动解释成模型能力变化；没有 usage 时成本为 `unavailable`。原始基准文件和产品 collection 均保持不变。
 - Prompt 注入默认上限 5000 字符；单个 Skill 损坏时只记录 warning 并跳过，不阻断 API 启动。
 - 三个领域 Skill 的展示品牌统一为 `ShopCare`；该变更仅影响 Skill 描述和 Prompt 文案，不改变 frontmatter 的 Agent 路由范围或运行逻辑。

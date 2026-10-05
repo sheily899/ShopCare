@@ -257,6 +257,11 @@ class KnowledgeBase:
         Returns:
             迁移的文档片段数量；无旧数据或新 collection 非空时返回 0。
         """
+        # Why：评测 collection 必须与产品库物理隔离，不能因空 collection
+        # 触发旧产品数据迁移；legacy 迁移只属于产品 collection 初始化。
+        if self.collection_name != DEFAULT_COLLECTION_NAME:
+            return 0
+
         count_method = getattr(self._collection, "count", None)
         if callable(count_method) and count_method() != 0:
             return 0
@@ -516,6 +521,74 @@ class KnowledgeBase:
         if ids:
             self._collection.add(ids=ids, documents=contents, metadatas=metadatas)
             logger.info("知识库写入 %s 个文档片段", len(ids))
+        return len(ids)
+
+    def add_stable_chunks(self, chunks: Sequence[Dict[str, Any]]) -> int:
+        """按既有稳定身份写入评测切片，不重新执行产品文档切片。
+
+        Args:
+            chunks: 已完成切片的评测片段，必须包含 ``id``、``content`` 和
+                七项基础 metadata；允许附带 domain、agent 等评测字段。
+
+        Returns:
+            实际写入或更新的切片数量。
+
+        Raises:
+            ValueError: 片段缺少稳定身份或七项 metadata。
+
+        说明：评测语料必须与产品知识库物理隔离，且保留原始 chunk ID；因此
+        本方法只做校验与 upsert，不调用 ``_chunk_text``，也不改变正文内容。
+        """
+
+        required = {
+            "title",
+            "source_document_id",
+            "source_chunk_id",
+            "content_hash",
+            "chunk_index",
+            "total_chunks",
+            "corpus_version",
+        }
+        ids: List[str] = []
+        documents: List[str] = []
+        metadatas: List[Dict[str, Any]] = []
+        for chunk in chunks:
+            if not isinstance(chunk, dict):
+                raise ValueError("评测 chunk 必须是对象")
+            chunk_id = str(chunk.get("id") or chunk.get("source_chunk_id") or "").strip()
+            content = str(chunk.get("content") or "")
+            if not chunk_id or not content:
+                raise ValueError("评测 chunk 必须包含非空 id 与 content")
+            metadata = dict(chunk)
+            metadata.pop("id", None)
+            metadata.pop("content", None)
+            missing = required.difference(metadata)
+            if missing:
+                raise ValueError(f"评测 chunk 缺少 metadata: {sorted(missing)}")
+            # Chroma metadata 只接受标量；评测字段也统一转为稳定字符串或数值。
+            clean_metadata: Dict[str, Any] = {}
+            for key, value in metadata.items():
+                if value is None:
+                    clean_metadata[key] = ""
+                elif isinstance(value, (str, int, float, bool)):
+                    clean_metadata[key] = value
+                else:
+                    clean_metadata[key] = str(value)
+            ids.append(chunk_id)
+            documents.append(content)
+            metadatas.append(clean_metadata)
+        if not ids:
+            return 0
+        upsert = getattr(self._collection, "upsert", None)
+        if callable(upsert):
+            upsert(ids=ids, documents=documents, metadatas=metadatas)
+        else:
+            self._collection.add(ids=ids, documents=documents, metadatas=metadatas)
+        logger.info(
+            "评测知识库写入 %s 个稳定文档片段: collection=%s",
+            len(ids),
+            getattr(self, "collection_name", "unknown"),
+        )
         return len(ids)
 
     def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:

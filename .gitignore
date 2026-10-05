@@ -11,6 +11,7 @@ models/
 backend/models/
 backend/data/chroma/
 backend/.data/
+backend/evaluation/reports/
 data/runtime/
 data/chroma/
 *.log
