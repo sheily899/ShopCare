@@ -349,3 +349,8 @@
 - 路径边界：`CUSTOMEROPS_SKILLS_DIR` 默认 `skills`；从仓库根目录使用 `--app-dir backend` 启动时自动回退解析到 `backend/skills`，容器内仍使用 `/app/skills`。
 - 安全边界：Skill 只提供本地只读规则文本，不执行工具、不调用外部订单/支付/退款/工单系统；`/skills` 与 `/skills/reload` 仅返回本地扫描快照。
 - 验证：`test_skill_manager.py`、`test_agent_orchestrator.py`、`test_api_lifespan.py` 聚焦回归通过；完整结果以最终全量测试为准。
+
+## Skill 品牌名称统一
+
+- 三个领域 `SKILL.md` 中的旧品牌 `CustomerOps` 已统一替换为 `ShopCare`；规则正文、Agent 范围、安全约束和加载逻辑未改变。
+- 验证：Skill/Agent 回归 `10 passed`；`git diff --check` 通过。

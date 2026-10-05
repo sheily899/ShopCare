@@ -430,3 +430,4 @@ backend/skills/*/SKILL.md
 - Skill 文本只作为领域规则提示，不改变 Agent 工具白名单，也不绕过已有的外部业务安全边界。
 - SkillManager 采用标准库解析简单 frontmatter，避免新增未锁定 YAML 依赖。
 - Prompt 注入默认上限 5000 字符；单个 Skill 损坏时只记录 warning 并跳过，不阻断 API 启动。
+- 三个领域 Skill 的展示品牌统一为 `ShopCare`；该变更仅影响 Skill 描述和 Prompt 文案，不改变 frontmatter 的 Agent 路由范围或运行逻辑。
