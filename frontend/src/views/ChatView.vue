@@ -65,6 +65,13 @@ function renderMarkdown(value) {
     const line = lines[index]
     if (!line.trim()) { index += 1; continue }
 
+    // Markdown 水平分隔线必须作为独立块处理，避免被当作普通文本显示为三个短横线。
+    if (/^\s{0,3}(?:---+|\*\*\*+|___+)\s*$/.test(line)) {
+      output.push('<hr>')
+      index += 1
+      continue
+    }
+
     if (/^\s*```/.test(line)) {
       const codeLines = []
       index += 1
@@ -124,7 +131,7 @@ function renderMarkdown(value) {
     const paragraph = []
     while (index < lines.length && lines[index].trim()) {
       const current = lines[index]
-      if (paragraph.length && (/^\s*```/.test(current) || /^\s*(#{1,3})\s+/.test(current) || /^\s*[-*+]\s+/.test(current) || /^\s*\d+[.)]\s+/.test(current))) break
+      if (paragraph.length && (/^\s*```/.test(current) || /^\s*(#{1,3})\s+/.test(current) || /^\s*[-*+]\s+/.test(current) || /^\s*\d+[.)]\s+/.test(current) || /^\s{0,3}(?:---+|\*\*\*+|___+)\s*$/.test(current))) break
       paragraph.push(escapeHtml(current))
       index += 1
     }
