@@ -6,6 +6,7 @@ import logging
 from types import SimpleNamespace
 
 import mcp.knowledge_base as knowledge_base_module
+import pytest
 
 
 class FakeCollection:
@@ -94,6 +95,14 @@ def test_http_failure_falls_back_to_persistent_client_and_logs(monkeypatch, capl
 def test_embedding_cpu_normalization_and_hnsw_configuration(monkeypatch):
     """模型名、CPU、归一化和 HNSW l2 配置必须精确传递。"""
 
+    monkeypatch.setenv(
+        "CUSTOMEROPS_KB_COLLECTION",
+        knowledge_base_module.DEFAULT_COLLECTION_NAME,
+    )
+    monkeypatch.setenv(
+        "CUSTOMEROPS_EMBEDDING_MODEL",
+        knowledge_base_module.DEFAULT_EMBEDDING_MODEL,
+    )
     captured = {}
 
     class FakeEmbeddingFunction:
@@ -113,7 +122,7 @@ def test_embedding_cpu_normalization_and_hnsw_configuration(monkeypatch):
 
     assert isinstance(embedding, FakeEmbeddingFunction)
     assert captured == {
-        "model_name": "BAAI/bge-small-zh-v1.5",
+        "model_name": knowledge_base_module.resolve_embedding_model_name(),
         "device": "cpu",
         "normalize_embeddings": True,
     }
@@ -127,16 +136,28 @@ def test_embedding_cpu_normalization_and_hnsw_configuration(monkeypatch):
     )
     knowledge_base_module.KnowledgeBase(client=client)
 
-    assert client.collection_kwargs["name"] == "knowledge_base_zh"
+    assert client.collection_kwargs["name"] == knowledge_base_module.DEFAULT_COLLECTION_NAME
     assert client.collection_kwargs["metadata"]["hnsw:space"] == "l2"
     assert client.collection_kwargs["metadata"]["embedding_model"] == (
         "BAAI/bge-small-zh-v1.5"
     )
+    assert client.collection_kwargs["embedding_function"] is None
+
+
+def test_missing_local_embedding_model_fails_closed_without_remote_fallback():
+    with pytest.raises(FileNotFoundError, match="本地 embedding 模型不存在"):
+        knowledge_base_module.resolve_embedding_model_name(
+            "model-that-is-not-installed"
+        )
 
 
 def test_empty_new_collection_migrates_legacy_documents(monkeypatch):
     """新 collection 为空时应将旧 collection 的内容迁移过来。"""
 
+    monkeypatch.setenv(
+        "CUSTOMEROPS_KB_COLLECTION",
+        knowledge_base_module.DEFAULT_COLLECTION_NAME,
+    )
     new_collection = FakeCollection(count=0)
 
     class LegacyCollection:
@@ -151,7 +172,7 @@ def test_empty_new_collection_migrates_legacy_documents(monkeypatch):
     monkeypatch.setattr(
         knowledge_base_module,
         "build_embedding_function",
-        lambda model: object(),
+        lambda model: lambda texts: [[0.1, 0.2, 0.3] for _ in texts],
     )
 
     knowledge_base_module.KnowledgeBase(client=client)
@@ -160,3 +181,4 @@ def test_empty_new_collection_migrates_legacy_documents(monkeypatch):
     migrated_metadata = new_collection.add_calls[0]["metadatas"][0]
     assert migrated_metadata["source_chunk_id"] == "legacy_chunk_0"
     assert migrated_metadata["content_hash"].startswith("sha256:")
+    assert new_collection.add_calls[0]["embeddings"] == [[0.1, 0.2, 0.3]]

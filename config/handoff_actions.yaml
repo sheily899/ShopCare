@@ -1,0 +1,567 @@
+version: handoff-actions-v1
+actions:
+  - id: ingredient_fit.ask_product
+    intent: ingredient_fit
+    when: {kind: missing_slot, field_id: product_name}
+    type: missing_field
+    field_id: product_name
+    text: 确认具体商品名称或系列
+    reason: 当前缺少商品信息，无法对应成分资料
+    ui_anchor: case.slots.product_name
+    done_when: {kind: slot_filled, field_id: product_name}
+    reply: 请问您咨询的是哪一款商品？
+  - id: ingredient_fit.verify_knowledge
+    intent: ingredient_fit
+    when: {kind: subrequest_open, intent: ingredient_fit}
+    type: ticket
+    text: 核对该商品已收录的成分与适配资料
+    reason: 需要依据对应商品资料回答，不根据印象补充
+    ui_anchor: case.sub_requests.ingredient_fit
+    done_when: {kind: subrequest_resolved, intent: ingredient_fit}
+    reply: 我会先核对这款商品的成分资料，再按资料向您说明。
+  - id: ingredient_fit.ask_skin_type
+    intent: ingredient_fit
+    when: {kind: missing_slot, field_id: skin_type}
+    type: missing_field
+    field_id: skin_type
+    text: 确认顾客关注的肤质或适配点
+    reason: 适配判断需要明确顾客关注的肤质
+    ui_anchor: case.slots.skin_type
+    done_when: {kind: slot_filled, field_id: skin_type}
+    reply: 您主要想确认哪种肤质是否适用？
+
+  - id: shade_match.ask_skin_tone
+    intent: shade_match
+    when: {kind: missing_slot, field_id: skin_tone}
+    type: missing_field
+    field_id: skin_tone
+    text: 确认肤色或现用底妆色号
+    reason: 色号建议需要顾客提供肤色信息
+    ui_anchor: case.slots.skin_tone
+    done_when: {kind: slot_filled, field_id: skin_tone}
+    reply: 您平时使用的底妆色号或肤色大致是什么？
+  - id: shade_match.verify_product
+    intent: shade_match
+    when: {kind: subrequest_open, intent: shade_match}
+    type: ticket
+    text: 核对商品色号资料并说明适配范围
+    reason: 色号信息须以商品资料为准，不承诺绝对显白
+    ui_anchor: case.sub_requests.shade_match
+    done_when: {kind: subrequest_resolved, intent: shade_match}
+    reply: 我会结合您提供的肤色和妆效需求核对色号资料。
+  - id: shade_match.ask_finish
+    intent: shade_match
+    when: {kind: missing_slot, field_id: makeup_finish}
+    type: missing_field
+    field_id: makeup_finish
+    text: 确认期望的妆效或色号偏好
+    reason: 妆效偏好会影响色号建议
+    ui_anchor: case.slots.makeup_finish
+    done_when: {kind: slot_filled, field_id: makeup_finish}
+    reply: 您更偏好自然、提气色还是其他妆效？
+
+  - id: usage_howto.ask_product
+    intent: usage_howto
+    when: {kind: missing_slot, field_id: product_name}
+    type: missing_field
+    field_id: product_name
+    text: 确认具体商品名称
+    reason: 不同商品的使用说明可能不同
+    ui_anchor: case.slots.product_name
+    done_when: {kind: slot_filled, field_id: product_name}
+    reply: 请问您想了解哪一款商品的使用方法？
+  - id: usage_howto.verify_instructions
+    intent: usage_howto
+    when: {kind: subrequest_open, intent: usage_howto}
+    type: ticket
+    text: 按商品说明核对使用顺序、频次和注意事项
+    reason: 使用建议应以已收录的商品说明为准
+    ui_anchor: case.sub_requests.usage_howto
+    done_when: {kind: subrequest_resolved, intent: usage_howto}
+    reply: 我会先按这款商品的说明核对使用顺序和频次。
+  - id: usage_howto.ask_context
+    intent: usage_howto
+    when: {kind: missing_slot, field_id: usage_context}
+    type: missing_field
+    field_id: usage_context
+    text: 确认当前使用步骤或搭配产品
+    reason: 需要了解实际使用场景才能核对步骤
+    ui_anchor: case.slots.usage_context
+    done_when: {kind: slot_filled, field_id: usage_context}
+    reply: 您目前是在什么步骤使用，或与哪些产品搭配？
+
+  - id: product_info.ask_product
+    intent: product_info
+    when: {kind: missing_slot, field_id: product_name}
+    type: missing_field
+    field_id: product_name
+    text: 确认具体商品名称或系列
+    reason: 需要锁定商品后才能核对规格资料
+    ui_anchor: case.slots.product_name
+    done_when: {kind: slot_filled, field_id: product_name}
+    reply: 请问您想了解哪一款商品？
+  - id: product_info.verify_specs
+    intent: product_info
+    when: {kind: subrequest_open, intent: product_info}
+    type: ticket
+    text: 核对商品规格、容量和套装内容
+    reason: 商品信息应以当前商品资料为准
+    ui_anchor: case.sub_requests.product_info
+    done_when: {kind: subrequest_resolved, intent: product_info}
+    reply: 我会核对这款商品的规格和套装内容后再向您说明。
+  - id: product_info.ask_spec
+    intent: product_info
+    when: {kind: missing_slot, field_id: requested_spec}
+    type: missing_field
+    field_id: requested_spec
+    text: 确认顾客具体想了解的商品信息
+    reason: 明确查询点可避免答非所问
+    ui_anchor: case.slots.requested_spec
+    done_when: {kind: slot_filled, field_id: requested_spec}
+    reply: 您主要想确认容量、规格还是套装内容？
+
+  - id: promo_rules.ask_activity
+    intent: promo_rules
+    when: {kind: missing_slot, field_id: activity_name}
+    type: missing_field
+    field_id: activity_name
+    text: 确认咨询的活动或优惠名称
+    reason: 活动条件按具体活动核对
+    ui_anchor: case.slots.activity_name
+    done_when: {kind: slot_filled, field_id: activity_name}
+    reply: 请问您咨询的是哪项活动或优惠？
+  - id: promo_rules.verify_terms
+    intent: promo_rules
+    when: {kind: subrequest_open, intent: promo_rules}
+    type: ticket
+    text: 核对活动适用条件及对应赠品规则
+    reason: 具体活动条件需要依据活动资料确认
+    ui_anchor: case.sub_requests.promo_rules
+    done_when: {kind: subrequest_resolved, intent: promo_rules}
+    reply: 我会按您提到的活动核对适用条件和赠品规则。
+  - id: promo_rules.ask_order
+    intent: promo_rules
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 如需核对个人订单，确认订单号
+    reason: 订单相关活动权益需匹配具体订单
+    ui_anchor: case.slots.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 如果您要核对订单中的活动权益，请提供订单号。
+
+  - id: pregnancy_safety.ask_product
+    intent: pregnancy_safety
+    when: {kind: missing_slot, field_id: product_name}
+    type: missing_field
+    field_id: product_name
+    text: 确认具体商品名称
+    reason: 特殊人群适用资料需要对应具体商品
+    ui_anchor: case.slots.product_name
+    done_when: {kind: slot_filled, field_id: product_name}
+    reply: 请问您想了解哪一款商品？
+  - id: pregnancy_safety.verify_info
+    intent: pregnancy_safety
+    when: {kind: subrequest_open, intent: pregnancy_safety}
+    type: safety
+    text: 依据商品资料核对特殊人群适用说明，不作医疗结论
+    reason: 孕期或哺乳期适用问题不应由客服作医疗诊断
+    ui_anchor: case.sub_requests.pregnancy_safety
+    done_when: {kind: subrequest_resolved, intent: pregnancy_safety}
+    reply: 我会核对商品已有说明；如涉及个人用药或身体状况，请以医生建议为准。
+  - id: pregnancy_safety.ask_stage
+    intent: pregnancy_safety
+    when: {kind: missing_slot, field_id: population_stage}
+    type: missing_field
+    field_id: population_stage
+    text: 确认顾客咨询的特殊阶段
+    reason: 孕期、哺乳期等阶段对应的资料可能不同
+    ui_anchor: case.slots.population_stage
+    done_when: {kind: slot_filled, field_id: population_stage}
+    reply: 您想确认的是孕期、哺乳期还是其他特殊阶段？
+
+  - id: order_status.ask_order
+    intent: order_status
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 请顾客提供订单号以定位订单
+    reason: 当前没有可唯一匹配的订单信息
+    ui_anchor: case.slots.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 请提供订单号，我再帮您核对订单状态。
+  - id: order_status.explain_result
+    intent: order_status
+    when: {kind: subrequest_open, intent: order_status}
+    type: ticket
+    text: 核对订单当前节点并向顾客说明已确认的信息
+    reason: 只转述工具或记录中已核实的订单状态
+    ui_anchor: case.sub_requests.order_status
+    done_when: {kind: subrequest_resolved, intent: order_status}
+    reply: 我会先核对订单当前节点，再把已确认的信息告诉您。
+  - id: order_status.verify_logistics
+    intent: order_status
+    when: {kind: missing_slot, field_id: tracking_no}
+    type: missing_field
+    field_id: tracking_no
+    text: 订单无法匹配时确认物流单号
+    reason: 部分物流查询需要物流单号才能继续
+    ui_anchor: case.slots.tracking_no
+    done_when: {kind: slot_filled, field_id: tracking_no}
+    reply: 如果您手边有物流单号，也可以一并提供。
+
+  - id: logistics_stalled.ask_order
+    intent: logistics_stalled
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 确认订单号或物流单号
+    reason: 需要订单或物流单号定位停滞记录
+    ui_anchor: case.slots.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 请提供订单号或物流单号，我来核对停滞节点。
+  - id: logistics_stalled.check_stall
+    intent: logistics_stalled
+    when: {kind: subrequest_open, intent: logistics_stalled}
+    type: commitment
+    text: 根据已确认的物流记录判断是否需要催查并反馈结果
+    reason: 只有核实物流节点后才能决定是否提交催查
+    ui_anchor: case.sub_requests.logistics_stalled
+    done_when: {kind: subrequest_resolved, intent: logistics_stalled}
+    reply: 我会先核对物流最近一次更新，再确认是否需要提交催查。
+  - id: logistics_stalled.ask_tracking
+    intent: logistics_stalled
+    when: {kind: missing_slot, field_id: tracking_no}
+    type: missing_field
+    field_id: tracking_no
+    text: 订单号无法定位时补充物流单号
+    reason: 物流单号可用于进一步核对承运记录
+    ui_anchor: case.slots.tracking_no
+    done_when: {kind: slot_filled, field_id: tracking_no}
+    reply: 若方便，请再提供物流单号。
+
+  - id: signed_not_received.ask_order
+    intent: signed_not_received
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 确认订单号
+    reason: 需匹配具体订单和签收记录
+    ui_anchor: ticket.fields.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 请提供订单号，我来核对签收记录。
+  - id: signed_not_received.confirm_receiver
+    intent: signed_not_received
+    when: {kind: missing_slot, field_id: received_by}
+    type: missing_field
+    field_id: received_by
+    text: 确认包裹是否由家人、物业或他人代收
+    reason: 显示签收但未收到时需要先核实代收情况
+    ui_anchor: ticket.fields.received_by
+    done_when: {kind: slot_filled, field_id: received_by}
+    reply: 请问家人、物业或附近代收点是否可能代收了包裹？
+  - id: signed_not_received.check_ticket
+    intent: signed_not_received
+    when: {kind: ticket_open, intent: signed_not_received}
+    type: ticket
+    text: 核对签收时间、地址及代收信息后提交物流核验
+    reason: 未核实前不直接认定包裹丢失
+    ui_anchor: ticket.fields.signed_info
+    done_when: {kind: ticket_submitted}
+    reply: 我会核对签收时间、地址和代收情况，再提交物流核验。
+
+  - id: intercept_change_address.ask_order
+    intent: intercept_change_address
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 确认需要拦截或改址的订单号
+    reason: 需匹配订单当前发货状态
+    ui_anchor: ticket.fields.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 请提供需要拦截或改址的订单号。
+  - id: intercept_change_address.confirm_request
+    intent: intercept_change_address
+    when: {kind: missing_slot, field_id: intercept_or_change}
+    type: missing_field
+    field_id: intercept_or_change
+    text: 确认顾客需要拦截包裹还是修改地址
+    reason: 两种履约操作不同，需确认具体诉求
+    ui_anchor: ticket.fields.intercept_or_change
+    done_when: {kind: slot_filled, field_id: intercept_or_change}
+    reply: 您希望拦截包裹，还是申请修改收货地址？
+  - id: intercept_change_address.check_ticket
+    intent: intercept_change_address
+    when: {kind: ticket_open, intent: intercept_change_address}
+    type: ticket
+    text: 核对发货状态并提交物流侧确认，等待结果后反馈
+    reason: 拦截或改址是否成功需物流系统确认
+    ui_anchor: ticket.fields.tracking_no
+    done_when: {kind: ticket_submitted}
+    reply: 我会先核对发货状态，再向物流侧确认是否可以处理。
+
+  - id: missing_item.ask_order
+    intent: missing_item
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 确认漏发问题对应的订单号
+    reason: 需核对订单商品和活动赠品明细
+    ui_anchor: ticket.fields.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 请提供订单号，我来核对订单明细。
+  - id: missing_item.verify_gift_fulfillment
+    intent: missing_item
+    when: {kind: subrequest_open, intent: missing_item}
+    type: ticket
+    text: 核对直播承诺截图与订单赠品发货记录
+    reason: 依据 R-11 核对活动赠品约定与订单明细，不预判补发结果
+    ui_anchor: ticket.fields.missing_item
+    done_when: {kind: subrequest_resolved, intent: missing_item}
+    reply: 我会核对直播活动承诺和订单中的赠品发货记录，再向您说明。
+  - id: missing_item.ask_quantity
+    intent: missing_item
+    when: {kind: missing_slot, field_id: quantity}
+    type: missing_field
+    field_id: quantity
+    text: 确认缺少的商品或赠品名称和数量
+    reason: 需要明确缺少的具体物品及数量
+    ui_anchor: ticket.fields.quantity
+    done_when: {kind: slot_filled, field_id: quantity}
+    reply: 请问具体少了哪件商品或赠品、数量是多少？
+
+  - id: wrong_item.ask_order
+    intent: wrong_item
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 确认错发问题对应的订单号
+    reason: 需匹配订单购买的商品规格
+    ui_anchor: ticket.fields.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 请提供订单号，我来核对购买的规格。
+  - id: wrong_item.confirm_received
+    intent: wrong_item
+    when: {kind: missing_slot, field_id: wrong_item}
+    type: missing_field
+    field_id: wrong_item
+    text: 确认订单商品与实际收到商品分别是什么
+    reason: 需要对照订单与实收信息确认是否错发
+    ui_anchor: ticket.fields.wrong_item
+    done_when: {kind: slot_filled, field_id: wrong_item}
+    reply: 请告诉我订单中的商品和实际收到的商品分别是什么？
+  - id: wrong_item.check_ticket
+    intent: wrong_item
+    when: {kind: ticket_open, intent: wrong_item}
+    type: ticket
+    text: 核对商品规格与实收信息后确认换货处理方式
+    reason: 处理方式需以订单和实物核验结果为准
+    ui_anchor: ticket.fields.shade
+    done_when: {kind: ticket_submitted}
+    reply: 我会先核对订单规格和您收到的商品，再确认后续处理方式。
+
+  - id: damaged_on_arrival.ask_order
+    intent: damaged_on_arrival
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 确认破损问题对应的订单号
+    reason: 需匹配订单与签收记录
+    ui_anchor: ticket.fields.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 请提供订单号，我来登记并核对商品信息。
+  - id: damaged_on_arrival.confirm_damage
+    intent: damaged_on_arrival
+    when: {kind: missing_slot, field_id: damaged_area}
+    type: missing_field
+    field_id: damaged_area
+    text: 确认破损部位、范围及是否有渗漏
+    reason: 破损情况影响质量核验
+    ui_anchor: ticket.fields.damaged_area
+    done_when: {kind: slot_filled, field_id: damaged_area}
+    reply: 请问具体是哪里破损，是否有渗漏？
+  - id: damaged_on_arrival.check_ticket
+    intent: damaged_on_arrival
+    when: {kind: ticket_open, intent: damaged_on_arrival}
+    type: ticket
+    text: 核对商品及包装破损情况并提交质量核验
+    reason: 质量结论需基于商品和包装信息核实
+    ui_anchor: ticket.fields.damaged_area
+    done_when: {kind: ticket_submitted}
+    reply: 我会根据您提供的破损情况提交质量核验，再反馈处理结果。
+
+  - id: return_refund.ask_order
+    intent: return_refund
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 确认退货退款申请对应的订单号
+    reason: 需要核对订单和售后状态
+    ui_anchor: ticket.fields.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 请提供订单号，我来核对退货退款条件。
+  - id: return_refund.confirm_return_conditions
+    intent: return_refund
+    when: {kind: subrequest_open, intent: return_refund}
+    type: ticket
+    text: 核实退货退款条件及退货运费承担情况
+    reason: 按售后规则逐项核对；涉及运费时依据 R-04，不预判审核结果
+    ui_anchor: ticket.fields.opened_or_used
+    done_when: {kind: subrequest_resolved, intent: return_refund}
+    reply: 我会核实退货退款条件和退货运费承担情况，再向您说明。
+  - id: return_refund.confirm_condition
+    intent: return_refund
+    when: {kind: missing_slot, field_id: opened_or_used}
+    type: missing_field
+    field_id: opened_or_used
+    text: 确认商品是否拆封或使用
+    reason: 拆封和使用状态会影响售后条件核对
+    ui_anchor: ticket.fields.opened_or_used
+    done_when: {kind: slot_filled, field_id: opened_or_used}
+    reply: 请问商品目前是否拆封或使用？
+
+  - id: adverse_reaction.confirm_medical_visit
+    intent: adverse_reaction
+    when: {kind: slot_value_in, field_id: medical_visit, values: [empty, declined, unknown, 未就医]}
+    type: safety
+    field_id: medical_visit
+    text: 确认是否已就医，并把结果记入工单
+    reason: 规则 R-07 要求登记后回访，该信息决定后续处理
+    ui_anchor: ticket.fields.medical_visit
+    done_when: {kind: slot_filled, field_id: medical_visit}
+    reply: 请问您目前是否已经就医？
+  - id: adverse.assess_current_safety
+    intent: adverse_reaction
+    when: {kind: missing_slot, field_id: current_symptoms}
+    type: safety
+    field_id: current_symptoms
+    text: 确认目前是否有呼吸不适或症状持续加重
+    reason: 当前身体安全情况优先于售后处理
+    ui_anchor: ticket.fields.symptom
+    done_when: {kind: slot_filled, field_id: current_symptoms}
+    reply: 请问目前有没有呼吸不适，或症状仍在持续加重？
+  - id: adverse.check_ticket
+    intent: adverse_reaction
+    when: {kind: callback_pending_due}
+    type: commitment
+    text: 按已配置的回访时限联系顾客
+    reason: 仅在系统存在明确回访时限时安排回访
+    ui_anchor: callback_task
+    done_when: {kind: callback_contacted}
+    reply: 我会按登记的回访安排联系您。
+
+  - id: suspected_abnormal_refund.ask_order
+    intent: suspected_abnormal_refund
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 确认需要核验的订单号
+    reason: 退款核验需要匹配具体订单
+    ui_anchor: ticket.fields.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 请提供需要核验的订单号。
+  - id: suspected_abnormal_refund.check_refund
+    intent: suspected_abnormal_refund
+    when: {kind: subrequest_open, intent: suspected_abnormal_refund}
+    type: safety
+    text: 核对退款记录并交由风控人工复核
+    reason: 只记录待核验信号，不对消费者作异常或欺诈结论
+    ui_anchor: case.sub_requests.suspected_abnormal_refund
+    done_when: {kind: subrequest_resolved, intent: suspected_abnormal_refund}
+    reply: 我会核对退款记录，并按流程提交人工复核。
+  - id: suspected_abnormal_refund.check_ticket
+    intent: suspected_abnormal_refund
+    when: {kind: ticket_open, intent: suspected_abnormal_refund}
+    type: ticket
+    text: 补齐退款金额及状态后提交审核
+    reason: 审核需要基于退款记录，不预先判断原因
+    ui_anchor: ticket.fields.refund_amount
+    done_when: {kind: ticket_submitted}
+    reply: 我会先核对退款金额和当前状态，再提交审核。
+
+  - id: price_protection.ask_order
+    intent: price_protection
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 确认申请价保的订单号
+    reason: 价保需匹配下单时间和商品价格
+    ui_anchor: ticket.fields.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 请提供订单号，我来核对下单时间和价格。
+  - id: price_protection.verify_difference
+    intent: price_protection
+    when: {kind: subrequest_open, intent: price_protection}
+    type: ticket
+    text: 按活动规则核对价保资格与价差
+    reason: 资格和价差需基于订单及活动条件计算
+    ui_anchor: ticket.fields.price_difference
+    done_when: {kind: subrequest_resolved, intent: price_protection}
+    reply: 我会按订单和活动规则核对是否符合价保条件及价差。
+  - id: price_protection.check_ticket
+    intent: price_protection
+    when: {kind: ticket_open, intent: price_protection}
+    type: ticket
+    text: 记录核实结果并提交价保审核
+    reason: 价保结果需按审核流程确认
+    ui_anchor: ticket.fields.price_difference
+    done_when: {kind: ticket_submitted}
+    reply: 核对完成后，我会按流程提交价保审核并反馈结果。
+
+  - id: refund_not_received.ask_order
+    intent: refund_not_received
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 确认退款未到账对应的订单号
+    reason: 需要匹配退款记录和订单信息
+    ui_anchor: ticket.fields.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 请提供订单号，我来核对退款记录。
+  - id: refund_not_received.check_status
+    intent: refund_not_received
+    when: {kind: subrequest_open, intent: refund_not_received}
+    type: ticket
+    text: 核对退款发起状态、金额及支付渠道
+    reason: 不承诺具体到账时间，先核实已记录的退款状态
+    ui_anchor: ticket.fields.refund_status
+    done_when: {kind: subrequest_resolved, intent: refund_not_received}
+    reply: 我会核对退款状态、金额和支付渠道，再向您说明当前进度。
+  - id: refund_not_received.check_ticket
+    intent: refund_not_received
+    when: {kind: ticket_open, intent: refund_not_received}
+    type: ticket
+    text: 整理退款查询结果并提交人工跟进
+    reason: 到账状态以支付渠道与后台记录核验为准
+    ui_anchor: ticket.fields.refund_status
+    done_when: {kind: ticket_submitted}
+    reply: 我会整理已核实的退款信息并提交跟进。
+
+  - id: shipping_fee_reimbursement.ask_order
+    intent: shipping_fee_reimbursement
+    when: {kind: missing_slot, field_id: order_id}
+    type: missing_field
+    field_id: order_id
+    text: 确认运费报销申请对应的订单号
+    reason: 需匹配售后记录和运费凭证
+    ui_anchor: ticket.fields.order_id
+    done_when: {kind: slot_filled, field_id: order_id}
+    reply: 请提供订单号，我来核对对应的售后记录。
+  - id: shipping_fee_reimbursement.verify_terms
+    intent: shipping_fee_reimbursement
+    when: {kind: subrequest_open, intent: shipping_fee_reimbursement}
+    type: ticket
+    text: 核对运费承担条件、凭证和申请金额
+    reason: 费用承担及报销额度须按规则和凭证核实
+    ui_anchor: ticket.fields.refund_amount
+    done_when: {kind: subrequest_resolved, intent: shipping_fee_reimbursement}
+    reply: 我会核对运费承担条件、凭证和申请金额，再向您说明。
+  - id: shipping_fee_reimbursement.check_ticket
+    intent: shipping_fee_reimbursement
+    when: {kind: ticket_open, intent: shipping_fee_reimbursement}
+    type: ticket
+    text: 整理运费核对结果并提交人工审核
+    reason: 报销结果需经人工审核确认
+    ui_anchor: ticket.fields.refund_amount
+    done_when: {kind: ticket_submitted}
+    reply: 核对后我会按流程提交运费审核，不会预先承诺报销结果。

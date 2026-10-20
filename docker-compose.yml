@@ -3,7 +3,7 @@ services:
     image: redis:7-alpine
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - shopcare-redis-data:/data
     healthcheck:
@@ -20,7 +20,7 @@ services:
       IS_PERSISTENT: "TRUE"
       ANONYMIZED_TELEMETRY: "FALSE"
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"
     volumes:
       - shopcare-chroma-data:/chroma/chroma
     healthcheck:
@@ -39,13 +39,18 @@ services:
     env_file:
       - ./backend/.env
     environment:
+      HANDOFF: ${HANDOFF:-true}
+      SHOPCARE_CONFIG_DIR: /config
       REDIS_URL: redis://redis:6379/0
       CHROMA_HOST: chromadb
       CHROMA_PORT: "8000"
       CHROMA_PERSIST_DIRECTORY: /app/.data/chroma
       ANONYMIZED_TELEMETRY: "FALSE"
-      CUSTOMEROPS_KB_COLLECTION: knowledge_base_zh
-      CUSTOMEROPS_EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
+      CUSTOMEROPS_KB_COLLECTION: knowledge_base_zh_bge_small_zh
+      # 使用项目内挂载的本地 BGE 模型，容器启动时不再访问 Hugging Face。
+      CUSTOMEROPS_EMBEDDING_MODEL: /app/.cache/models/bge-small-zh-v1.5
+      HF_HOME: /app/.cache/huggingface
+      TRANSFORMERS_OFFLINE: "1"
       CUSTOMEROPS_SKILLS_DIR: /app/skills
       CUSTOMEROPS_SKILLS_MAX_PROMPT_CHARS: "5000"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -58,7 +63,14 @@ services:
       chromadb:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./.cache/models:/app/.cache/models:ro
+      - ./.cache/huggingface:/app/.cache/huggingface
+      # 交接文案、规则与动作库不打包进后端镜像；统一只读挂载，避免容器内误写配置。
+      - ./config:/config:ro
+      # SQLite 会话、工单和风险看板必须跨容器重启保留。
+      - ./backend/.data:/app/.data
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8000/health"]
       interval: 15s
@@ -79,7 +91,7 @@ services:
         condition: service_healthy
     ports:
       # Windows 常见 HTTP.sys 会占用宿主机 80；容器内仍固定监听 80，宿主端口可按环境覆盖。
-      - "${SHOPCARE_FRONTEND_PORT:-8080}:80"
+      - "127.0.0.1:${SHOPCARE_FRONTEND_PORT:-8080}:80"
     networks:
       - shopcare-net
 

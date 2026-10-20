@@ -68,7 +68,7 @@ def knowledge_base(monkeypatch):
     monkeypatch.setattr(
         knowledge_base_module,
         "build_embedding_function",
-        lambda model: object(),
+        lambda model: lambda texts: [[0.1, 0.2, 0.3] for _ in texts],
     )
     return knowledge_base_module.KnowledgeBase(client=InjectedClient(collection)), collection
 

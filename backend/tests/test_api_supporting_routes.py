@@ -85,6 +85,10 @@ def _prepare_app(monkeypatch):
     api_main.app.state.knowledge_base = knowledge_base
     api_main.app.state.skill_manager = skill_manager
     api_main.app.state.agent_orchestrator._recent_traces.clear()
+    store = api_main.app.state.sqlite_store
+    identity = store.authenticate("agent-demo", "shopcare")
+    assert identity is not None
+    client.headers.update({"Authorization": f"Bearer {identity['token']}"})
     return client, knowledge_base, skill_manager
 
 
@@ -173,6 +177,29 @@ def test_knowledge_stats_and_trace_memory_routes(monkeypatch):
         assert one_trace.status_code == 200
         assert one_trace.json()["trace"]["request_id"] == "req-1"
         assert client.get("/trace/tool/not-found").status_code == 404
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_token_trace_routes_expose_stage_usage_without_prompt_content(monkeypatch):
+    """Token 台账只返回阶段用量和内存边界，不暴露原始请求文本。"""
+
+    client, _, _ = _prepare_app(monkeypatch)
+    try:
+        api_main.app.state.token_usage.record_request(
+            "token-1",
+            {"intent": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}},
+            latency_ms=12.3,
+        )
+        one = client.get("/trace/token/token-1")
+        assert one.status_code == 200
+        assert one.json()["trace"]["total"]["total_tokens"] == 5
+        assert "message" not in one.json()["trace"]
+
+        summary = client.get("/trace/tokens")
+        assert summary.status_code == 200
+        assert summary.json()["by_stage"]["intent"]["total_tokens"] == 5
+        assert summary.json()["restart_loses_data"] is True
     finally:
         client.__exit__(None, None, None)
 

@@ -12,8 +12,8 @@ def _required_response_fields() -> dict[str, object]:
     return {
         "conv_id": "conv-1",
         "response": "下一步请提供错误码。",
-        "intent": "technical",
-        "agent_type": "technical",
+        "intent": "product_info",
+        "agent_type": "consult",
         "escalated": False,
         "latency_ms": 12.5,
     }

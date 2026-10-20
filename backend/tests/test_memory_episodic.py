@@ -1,7 +1,9 @@
 import asyncio
 import json
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
+import pytest
 
 from memory.conversation_memory import (
     COMPRESS_AT,
@@ -86,10 +88,19 @@ def _run(coroutine):
     return asyncio.run(coroutine)
 
 
+@pytest.fixture(autouse=True)
+def _use_deterministic_test_embedding(monkeypatch):
+    """Memory unit tests must not load a real embedding model or hit the network."""
+    monkeypatch.setattr(
+        "memory.conversation_memory._local_memory_embedding",
+        lambda texts: [[0.1, 0.2, 0.3] for _ in texts],
+    )
+
+
 def test_compress_splits_old_and_keep_messages_and_resets_redis():
     redis = EpisodicRedis()
     llm = FakeLLM("摘要内容")
-    manager = MemoryManager(redis_client=redis, llm_client=llm)
+    manager = MemoryManager(redis_client=redis, llm_client=llm, episodic_collection=FakeCollection())
     _run(_seed(manager, count=16))
 
     summary = _run(manager.compress_working_memory("u", "c"))
@@ -112,14 +123,18 @@ def test_compress_splits_old_and_keep_messages_and_resets_redis():
 def test_summary_is_truncated_and_failure_uses_fixed_fallback():
     redis = EpisodicRedis()
     llm = FakeLLM("x" * (SUMMARY_MAX_CHARS + 200))
-    manager = MemoryManager(redis_client=redis, llm_client=llm)
+    manager = MemoryManager(redis_client=redis, llm_client=llm, episodic_collection=FakeCollection())
     _run(_seed(manager, count=16))
     summary = _run(manager.compress_working_memory("u", "c"))
     assert len(summary) == SUMMARY_MAX_CHARS
 
     redis2 = EpisodicRedis()
     failed_llm = FakeLLM(error=RuntimeError("timeout"))
-    manager2 = MemoryManager(redis_client=redis2, llm_client=failed_llm)
+    manager2 = MemoryManager(
+        redis_client=redis2,
+        llm_client=failed_llm,
+        episodic_collection=FakeCollection(),
+    )
     _run(_seed(manager2, count=16))
     fallback = _run(manager2.compress_working_memory("u", "c"))
     assert fallback == "对话包含 11 条消息（摘要生成失败）"
@@ -201,3 +216,55 @@ def test_episodic_access_uses_to_thread_and_isolates_chroma_errors(monkeypatch):
 
     broken = MemoryManager(redis_client=redis, episodic_collection=BrokenCollection())
     assert _run(broken.get_episodic_context("u", "c")) == []
+
+
+def test_memory_collections_disable_chroma_default_embedding(monkeypatch, tmp_path):
+    class CollectionClient:
+        def __init__(self):
+            self.calls = []
+            self.collection = FakeCollection()
+
+        def get_or_create_collection(self, **kwargs):
+            self.calls.append(kwargs)
+            return self.collection
+
+    monkeypatch.delenv("CHROMA_HOST", raising=False)
+    monkeypatch.setenv("CHROMA_PERSIST_DIRECTORY", str(tmp_path))
+
+    injected_client = CollectionClient()
+    injected_manager = MemoryManager(
+        redis_client=EpisodicRedis(), chroma_client=injected_client
+    )
+    assert injected_manager._get_episodic_collection() is not None
+    assert injected_manager._get_profile_collection() is not None
+    assert [call["embedding_function"] for call in injected_client.calls] == [None, None]
+
+    local_client = CollectionClient()
+    chromadb = ModuleType("chromadb")
+    chromadb.PersistentClient = lambda **kwargs: local_client
+    monkeypatch.setitem(sys.modules, "chromadb", chromadb)
+    local_manager = MemoryManager(redis_client=EpisodicRedis())
+    assert local_manager._get_episodic_collection() is not None
+    assert local_manager._get_profile_collection() is not None
+    assert [call["embedding_function"] for call in local_client.calls] == [None, None]
+
+    remote_client = CollectionClient()
+    http_calls = []
+    chromadb_http = ModuleType("chromadb")
+
+    def make_http_client(*, host, port):
+        http_calls.append((host, port))
+        return remote_client
+
+    chromadb_http.HttpClient = make_http_client
+    monkeypatch.setenv("CHROMA_HOST", "chroma.test")
+    monkeypatch.setenv("CHROMA_PORT", "8000")
+    monkeypatch.setitem(sys.modules, "chromadb", chromadb_http)
+    remote_manager = MemoryManager(redis_client=EpisodicRedis())
+    assert remote_manager._get_episodic_collection() is not None
+    assert remote_manager._get_profile_collection() is not None
+    assert [call["embedding_function"] for call in remote_client.calls] == [None, None]
+    assert http_calls == [("chroma.test", 8000), ("chroma.test", 8000)]
+
+    _run(remote_manager._store_episodic("u", "c", "summary", "full text"))
+    assert remote_client.collection.add_calls[0]["embeddings"] == [[0.1, 0.2, 0.3]]

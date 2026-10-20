@@ -22,13 +22,30 @@ except Exception:  # pragma: no cover - 由运行环境决定
     chromadb = None  # type: ignore
 
 
-DEFAULT_COLLECTION_NAME = "knowledge_base_zh"
+# 集合名包含 embedding 版本，避免复用旧的 384 维默认集合并触发 Chroma
+# 的 all-MiniLM-L6-v2 provider；新集合只接受项目本地 BGE 向量。
+DEFAULT_COLLECTION_NAME = "knowledge_base_zh_bge_small_zh"
 LEGACY_COLLECTION_NAME = "knowledge_base"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 DEFAULT_PERSIST_DIRECTORY = ".data/chroma"
 DEFAULT_CORPUS_VERSION = "kb-v1-default"
 CHUNK_SIZE = 500
 HNSW_SPACE = "l2"
+
+
+def resolve_embedding_model_name(model_name: str = DEFAULT_EMBEDDING_MODEL) -> str:
+    """只解析已存在的本地模型目录；缺失时失败关闭，绝不回退到远程模型名。"""
+    candidate = os.path.abspath(model_name)
+    if os.path.isdir(candidate):
+        return candidate
+    project_model = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "models", model_name)
+    )
+    if os.path.isdir(project_model):
+        return project_model
+    raise FileNotFoundError(
+        f"本地 embedding 模型不存在: {model_name}; 已检查 {candidate} 和 {project_model}"
+    )
 
 
 def _load_chromadb() -> Any:
@@ -120,8 +137,9 @@ def build_embedding_function(model_name: str = DEFAULT_EMBEDDING_MODEL) -> Any:
     try:
         module = _load_chromadb()
         embedding_functions = module.utils.embedding_functions
+        resolved_model = resolve_embedding_model_name(model_name)
         return embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=model_name,
+            model_name=resolved_model,
             device="cpu",
             normalize_embeddings=True,
         )
@@ -185,20 +203,21 @@ class KnowledgeBase:
             collection_name
             or os.getenv("CUSTOMEROPS_KB_COLLECTION", DEFAULT_COLLECTION_NAME)
         ).strip()
-        self._embedding_function = embedding_function or build_embedding_function(
-            self.embedding_model
-        )
+        self._embedding_function = embedding_function or build_embedding_function(self.embedding_model)
         self._use_server = False
         self._client = client or self._connect_client()
-        self._collection = self._client.get_or_create_collection(
-            name=self.collection_name,
-            metadata={
+        collection_kwargs = {
+            "name": self.collection_name,
+            "metadata": {
                 "description": "ShopCare 产品知识库",
                 "embedding_model": self.embedding_model,
                 "hnsw:space": HNSW_SPACE,
             },
-            embedding_function=self._embedding_function,
-        )
+        }
+        # 禁止 Chroma 默认 embedding provider（all-MiniLM）。无论 HTTP 还是本地
+        # collection，写入和查询都显式传入项目 BGE 向量，因此关闭隐式 provider。
+        collection_kwargs["embedding_function"] = None
+        self._collection = self._client.get_or_create_collection(**collection_kwargs)
         self._migrate_legacy_if_needed()
 
     def _connect_client(self) -> Any:
@@ -301,10 +320,12 @@ class KnowledgeBase:
                         ),
                     )
                 )
+            migrated_documents = [str(item) for item in documents]
             self._collection.add(
                 ids=migrated_ids,
-                documents=[str(item) for item in documents],
+                documents=migrated_documents,
                 metadatas=migrated_metas,
+                embeddings=self._embedding_function(migrated_documents),
             )
             logger.info(
                 "已将旧知识库迁移到 %s，共 %s 个文档片段",
@@ -519,7 +540,15 @@ class KnowledgeBase:
                     )
                 )
         if ids:
-            self._collection.add(ids=ids, documents=contents, metadatas=metadatas)
+            # HTTP Chroma 服务端不能复用本地 embedding function；显式传入本地
+            # BGE 向量，避免服务端回退到 all-MiniLM-L6-v2 并触发下载。
+            embeddings = self._embedding_function(contents)
+            self._collection.add(
+                ids=ids,
+                documents=contents,
+                metadatas=metadatas,
+                embeddings=embeddings,
+            )
             logger.info("知识库写入 %s 个文档片段", len(ids))
         return len(ids)
 
@@ -579,11 +608,22 @@ class KnowledgeBase:
             metadatas.append(clean_metadata)
         if not ids:
             return 0
+        embeddings = self._embedding_function(documents)
         upsert = getattr(self._collection, "upsert", None)
         if callable(upsert):
-            upsert(ids=ids, documents=documents, metadatas=metadatas)
+            upsert(
+                ids=ids,
+                documents=documents,
+                metadatas=metadatas,
+                embeddings=embeddings,
+            )
         else:
-            self._collection.add(ids=ids, documents=documents, metadatas=metadatas)
+            self._collection.add(
+                ids=ids,
+                documents=documents,
+                metadatas=metadatas,
+                embeddings=embeddings,
+            )
         logger.info(
             "评测知识库写入 %s 个稳定文档片段: collection=%s",
             len(ids),
@@ -612,8 +652,13 @@ class KnowledgeBase:
         bounded_top_k = max(0, int(top_k))
         if bounded_top_k == 0:
             return []
+        query_text = str(query or "")
+        # HttpClient 不会把本地 embedding_function 传给 Chroma 服务端；
+        # 如果使用 query_texts，Chroma 会自动下载默认 all-MiniLM-L6-v2。
+        # 这里强制本地 BGE 生成向量，再传 query_embeddings，避免错误模型和网络下载。
+        query_embedding = self._embedding_function([query_text])
         query_kwargs = {
-            "query_texts": [str(query or "")],
+            "query_embeddings": query_embedding,
             "n_results": bounded_top_k,
             "include": ["documents", "metadatas", "distances"],
         }

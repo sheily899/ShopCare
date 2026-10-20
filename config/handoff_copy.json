@@ -1,0 +1,10 @@
+{
+  "version": "handoff-copy-v1",
+  "online_ack": "已为您转接人工，请您稍等。",
+  "unknown_presence_ack": "已为您转接人工，请您稍等。已为您登记，专员上线后会联系您。",
+  "callback_sla_minutes": null,
+  "callback_reason": "客服在线状态未知，等待专员联系",
+  "temporary_summary_direct": "顾客直接要求转人工，暂无其他诉求",
+  "temporary_summary_prior": "顾客请求转人工；历史对话待交接任务整理。",
+  "temporary_summary_open_requests": "顾客请求转人工；存在未解决的业务诉求，待人工核对。"
+}

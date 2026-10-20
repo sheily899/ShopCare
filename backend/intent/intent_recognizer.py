@@ -11,40 +11,104 @@ import asyncio
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 import hashlib
-import inspect
 import logging
 import math
 import os
+from pathlib import Path
 import re
 import time
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+from intent.beauty_intent_registry import (
+    BEAUTY_INTENT_REGISTRY as REGISTRY_INTENTS,
+    EMBEDDING_TEMPLATES as REGISTRY_EMBEDDING_TEMPLATES,
+    LLM_INTENT_SCHEMA,
+    PATTERN_MAPS,
+)
+from handoff.config import load_handoff_urgency_config
+from handoff.urgency import is_explicit_handoff_requested, score_temporary_urgency
 
 
 logger = logging.getLogger(__name__)
 
 
+def _usage_from_llm_response(response: Any) -> Dict[str, int]:
+    """读取兼容 Anthropic 客户端返回的 token usage。"""
+
+    usage = response.get("usage") if isinstance(response, Mapping) else getattr(response, "usage", None)
+    if usage is None:
+        return {}
+    values: Dict[str, int] = {}
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        raw = usage.get(key) if isinstance(usage, Mapping) else getattr(usage, key, None)
+        try:
+            number = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if number >= 0:
+            values[key] = number
+    if "total_tokens" not in values and {"input_tokens", "output_tokens"}.issubset(values):
+        values["total_tokens"] = values["input_tokens"] + values["output_tokens"]
+    return values
+
+
 class IntentCategory(str, Enum):
     """所有识别通路都必须使用的封闭意图枚举集合。"""
 
-    QUERY = "query"
-    COMPLAINT = "complaint"
-    REQUEST = "request"
-    GREETING = "greeting"
-    TECHNICAL = "technical"
-    BILLING = "billing"
-    ACCOUNT = "account"
-    FEEDBACK = "feedback"
-    ORDER_STATUS = "order_status"
-    LOGISTICS = "logistics"
-    REFUND = "refund"
-    INVOICE = "invoice"
-    PAYMENT_ISSUE = "payment_issue"
-    ACCOUNT_SECURITY = "account_security"
-    TECHNICAL_LOGIN = "technical_login"
-    TECHNICAL_CRASH = "technical_crash"
+    INGREDIENT_FIT = "ingredient_fit"
+    SHADE_MATCH = "shade_match"
+    USAGE_HOWTO = "usage_howto"
+    PRODUCT_INFO = "product_info"
+    PROMO_RULES = "promo_rules"
+    PREGNANCY_SAFETY = "pregnancy_safety"
+    ORDER_STATUS_BEAUTY = "order_status"
+    LOGISTICS_STALLED = "logistics_stalled"
+    SIGNED_NOT_RECEIVED = "signed_not_received"
+    INTERCEPT_CHANGE_ADDRESS = "intercept_change_address"
+    MISSING_ITEM = "missing_item"
+    WRONG_ITEM = "wrong_item"
+    DAMAGED_ON_ARRIVAL = "damaged_on_arrival"
+    RETURN_REFUND = "return_refund"
+    ADVERSE_REACTION = "adverse_reaction"
+    SUSPECTED_ABNORMAL_REFUND = "suspected_abnormal_refund"
+    PRICE_PROTECTION = "price_protection"
+    REFUND_NOT_RECEIVED = "refund_not_received"
+    SHIPPING_FEE_REIMBURSEMENT = "shipping_fee_reimbursement"
+    ORDER_STATUS = ORDER_STATUS_BEAUTY
     HUMAN_HANDOFF = "human_handoff"
     ESCALATION = HUMAN_HANDOFF
     OTHER = "other"
+    # 仅用于读取历史评测数据，不进入新的 LLM Schema、Pattern 或路由候选。
+    LEGACY_QUERY = "query"
+    LEGACY_COMPLAINT = "complaint"
+    LEGACY_REQUEST = "request"
+    LEGACY_GREETING = "greeting"
+    LEGACY_TECHNICAL = "technical"
+    LEGACY_BILLING = "billing"
+    LEGACY_ACCOUNT = "account"
+    LEGACY_FEEDBACK = "feedback"
+    LEGACY_LOGISTICS = "logistics"
+    LEGACY_REFUND = "refund"
+    LEGACY_INVOICE = "invoice"
+    LEGACY_PAYMENT_ISSUE = "payment_issue"
+    LEGACY_ACCOUNT_SECURITY = "account_security"
+    LEGACY_TECHNICAL_LOGIN = "technical_login"
+    LEGACY_TECHNICAL_CRASH = "technical_crash"
+    QUERY = LEGACY_QUERY
+    COMPLAINT = LEGACY_COMPLAINT
+    REQUEST = LEGACY_REQUEST
+    GREETING = LEGACY_GREETING
+    TECHNICAL = LEGACY_TECHNICAL
+    BILLING = LEGACY_BILLING
+    ACCOUNT = LEGACY_ACCOUNT
+    FEEDBACK = LEGACY_FEEDBACK
+    LOGISTICS = LEGACY_LOGISTICS
+    REFUND = LEGACY_REFUND
+    INVOICE = LEGACY_INVOICE
+    PAYMENT_ISSUE = LEGACY_PAYMENT_ISSUE
+    ACCOUNT_SECURITY = LEGACY_ACCOUNT_SECURITY
+    TECHNICAL_LOGIN = LEGACY_TECHNICAL_LOGIN
+    TECHNICAL_CRASH = LEGACY_TECHNICAL_CRASH
 
 
 class UrgencyLevel(IntEnum):
@@ -88,6 +152,9 @@ class IntentResult:
     compound_trigger: str = ""
     intent_diagnostics: Dict[str, Any] = field(default_factory=dict)
     sub_requests: List[Dict[str, Any]] = field(default_factory=list)
+    emotion: str = "neutral"
+    emotion_intensity: float = 0.0
+    emotion_evidence: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -207,7 +274,12 @@ CLASSIFY_INTENT_TOOL: Dict[str, Any] = {
         "properties": {
             "intent": {
                 "type": "string",
-                "enum": [category.value for category in IntentCategory],
+                "enum": [
+                    *LLM_INTENT_SCHEMA["enum"],
+                    IntentCategory.HUMAN_HANDOFF.value,
+                    IntentCategory.OTHER.value,
+                ],
+                "description": "只允许使用 ShopCare 美妆意图注册表中的 19 个意图，以及 human_handoff/other 两个控制结果。",
             },
             "confidence": {
                 "type": "number",
@@ -229,8 +301,8 @@ CLASSIFY_INTENT_TOOL: Dict[str, Any] = {
                     "properties": {
                         "id": {"type": "string"},
                         "text": {"type": "string"},
-                        "domain": {"type": "string", "enum": ["general", "technical", "billing"]},
-                        "intent": {"type": "string", "enum": [category.value for category in IntentCategory]},
+                        "domain": {"type": "string", "enum": ["consult", "order", "after_sales"]},
+                        "intent": LLM_INTENT_SCHEMA,
                         "confidence": {"type": "number"},
                     },
                     "required": ["id", "text", "domain", "intent", "confidence"],
@@ -246,12 +318,19 @@ CLASSIFY_INTENT_TOOL: Dict[str, Any] = {
 # 保留来源导向的别名，供后续融合实现继续使用。
 _INTENT_TOOL = CLASSIFY_INTENT_TOOL
 DEFAULT_LLM_MODEL = "claude-3-5-sonnet-20241022"
-_LLM_SYSTEM_PROMPT = """你是 ShopCare 的电商客服意图分析器。
-请根据用户当前消息和可选的最近会话上下文，选择最具体的一个意图。
-如果消息包含多个可独立处理的业务问题，请同时返回 is_compound=true 和 sub_requests；每个子请求必须拆成独立文本，并只归属 general、technical、billing 三个业务域之一。
-必须调用 classify_intent 工具，不要输出自由文本 JSON。
-intent 必须使用工具 schema 中的枚举值，confidence 必须是数字，reasoning 说明最直接的判定依据。
-退款、发票、登录故障、崩溃、物流和人工请求优先使用对应的细粒度意图，不要用宽泛类别替代。"""
+_INTENT_BOUNDARY_GUIDE = "\n".join(
+    f"- {item['intent_id']}（{item['name_zh']}）：{item['description']} 区分：{item['distinction']} 边界：{item['boundary']}"
+    for item in REGISTRY_INTENTS
+)
+
+_LLM_SYSTEM_PROMPT = f"""你是 ShopCare 的美妆电商客服意图分析器。
+只根据用户当前消息识别用户此刻明确表达的需求；历史消息仅用于消歧，不把历史诉求当作当前诉求。
+只能选择工具 schema 中的 19 个美妆业务意图，或 human_handoff / other 控制结果，不使用其他行业的旧意图。
+必须区分肯定、否定和转折：被明确否定的动作不是请求；例如“我不要退款，只换货”不能判为退货退款，也不能在没有错发事实时判为错发；换货原因不明时判为 other 并等待澄清。
+如果消息包含多个可独立处理的业务问题，请返回 is_compound=true 和 sub_requests；每个子请求拆成独立文本，并只归属 consult、order、after_sales 三个业务域之一。
+必须调用 classify_intent 工具，不要输出自由文本 JSON。confidence 必须是数字，reasoning 说明当前消息中支持判定的依据。
+以下定义和边界均来自唯一意图注册表：
+{_INTENT_BOUNDARY_GUIDE}"""
 
 
 def _build_llm_user_message(
@@ -424,6 +503,9 @@ async def _recognize_with_llm(
             raise ValueError("工具返回的 reasoning 为空或不是字符串")
 
         diagnostics: Dict[str, Any] = {}
+        usage = _usage_from_llm_response(response)
+        if usage:
+            diagnostics["usage"] = usage
         if isinstance(payload.get("sub_requests"), list):
             diagnostics["llm_sub_requests"] = payload["sub_requests"]
             diagnostics["llm_is_compound"] = bool(payload.get("is_compound"))
@@ -442,32 +524,14 @@ async def _recognize_with_llm(
 
 
 HASH_EMBEDDING_DIM = 256
-EMBEDDING_MODEL = "voyage-3-lite"
+# 意图识别与知识库召回共用同一套本地模型配置。
+# 保留 ``EMBEDDING_MODEL`` 这个变量名作为兼容别名，避免外部调用方断裂。
+EMBEDDING_MODEL = os.getenv(
+    "CUSTOMEROPS_EMBEDDING_MODEL",
+    "BAAI/bge-small-zh-v1.5",
+)
 EMBEDDING_TEMPLATES: Dict[IntentCategory, Tuple[str, ...]] = {
-    IntentCategory.QUERY: ("我的订单状态是什么？", "如何重置密码？", "快递什么时候到？"),
-    IntentCategory.COMPLAINT: ("等了好几个小时！", "服务太差了！", "一直没人处理！"),
-    IntentCategory.REQUEST: ("帮我取消订单", "我需要修改地址", "请协助退款"),
-    IntentCategory.GREETING: ("你好", "嗨，有人吗", "早上好"),
-    IntentCategory.TECHNICAL: ("应用一直崩溃", "无法登录", "出现500错误"),
-    IntentCategory.BILLING: ("为什么扣了两次款？", "申请退款", "发票问题"),
-    IntentCategory.ACCOUNT: ("修改邮箱", "注销账户", "更新个人信息"),
-    IntentCategory.FEEDBACK: ("服务很棒！", "非常满意", "给个好评"),
-    IntentCategory.ORDER_STATUS: (
-        "我的订单现在是什么状态？",
-        "订单有没有发货？",
-        "订单处理到哪一步了？",
-    ),
-    IntentCategory.LOGISTICS: ("快递什么时候到？", "物流一直不更新", "配送要多久？"),
-    IntentCategory.REFUND: ("我要申请退款", "退货退款怎么处理？", "退款多久到账？"),
-    IntentCategory.INVOICE: ("帮我开发票", "发票抬头怎么改？", "电子发票在哪里？"),
-    IntentCategory.PAYMENT_ISSUE: (
-        "为什么重复扣款？",
-        "支付失败怎么办？",
-        "这个月多扣了钱",
-    ),
-    IntentCategory.ACCOUNT_SECURITY: ("账户被盗了", "发现异常登录", "我要重置密码"),
-    IntentCategory.TECHNICAL_LOGIN: ("登录一直报401", "验证码收不到", "无法登录账号"),
-    IntentCategory.TECHNICAL_CRASH: ("应用一直崩溃", "页面报500错误", "系统闪退"),
+    **{IntentCategory(intent_id): examples for intent_id, examples in REGISTRY_EMBEDDING_TEMPLATES.items()},
     IntentCategory.HUMAN_HANDOFF: ("转人工客服", "我要找人工", "请升级处理"),
     IntentCategory.OTHER: ("其他问题", "不清楚", "不知道"),
 }
@@ -521,92 +585,65 @@ def _cosine_similarity(left: List[float], right: List[float]) -> float:
     return min(1.0, max(0.0, float(score)))
 
 
-def _parse_remote_embeddings(payload: Any) -> Optional[List[List[float]]]:
-    """归一化常见远程 Embedding 响应结构。
+_LOCAL_EMBEDDING_FUNCTION: Any = None
+_LOCAL_EMBEDDING_INIT_FAILED = False
 
-    Args:
-        payload: 原始响应对象、映射或向量列表。
 
-    Returns:
-        浮点向量列表；载荷畸变时返回 ``None``。
+def _get_local_embedding_function() -> Any:
+    """懒加载与知识库相同的 BGE embedding function。
+
+    模型只在首次意图识别时初始化一次；初始化失败交给上层使用现有哈希降级。
     """
-    if hasattr(payload, "json") and callable(payload.json):
-        payload = payload.json()
-    if isinstance(payload, dict):
-        payload = payload.get("data", payload.get("embeddings", payload.get("embedding")))
-    if isinstance(payload, dict):
-        payload = [payload]
-    if not isinstance(payload, list):
-        return None
-    if payload and isinstance(payload[0], dict):
-        payload = [item.get("embedding") for item in payload]
-    if not all(isinstance(vector, list) for vector in payload):
+    global _LOCAL_EMBEDDING_FUNCTION, _LOCAL_EMBEDDING_INIT_FAILED
+    if _LOCAL_EMBEDDING_FUNCTION is not None or _LOCAL_EMBEDDING_INIT_FAILED:
+        return _LOCAL_EMBEDDING_FUNCTION
+    model_name = os.getenv("CUSTOMEROPS_EMBEDDING_MODEL", EMBEDDING_MODEL).strip()
+    # 不在本地时不要触发隐式下载；保持现有哈希降级的快速、离线行为。
+    model_path = Path(model_name)
+    project_model = Path(__file__).resolve().parents[1] / "models" / model_name
+    if not model_path.exists() and not project_model.is_dir():
+        _LOCAL_EMBEDDING_INIT_FAILED = True
+        logger.info("本地 BGE 模型未发现，使用哈希向量降级: %s", model_name)
         return None
     try:
-        return [[float(value) for value in vector] for vector in payload]
-    except (TypeError, ValueError):
-        return None
+        from mcp.knowledge_base import build_embedding_function
 
-
-async def _fetch_remote_embeddings(
-    texts: List[str],
-    remote_client: Any = None,
-) -> Optional[List[List[float]]]:
-    """尝试远程 Embedding 端点，同时保留本地降级行为。
-
-    Args:
-        texts: 必须按顺序生成向量的文本列表。
-        remote_client: 可选的注入 callable 或 HTTP 风格客户端。
-
-    Returns:
-        响应合法时返回远程向量，否则返回 ``None`` 让调用方使用哈希向量。
-    """
-    url = os.getenv("EMBEDDING_API_URL", "").strip()
-    if not url:
-        return None
-    payload = {"model": os.getenv("EMBEDDING_MODEL", EMBEDDING_MODEL), "input": texts}
-    headers = {}
-    api_key = os.getenv("EMBEDDING_API_KEY", "").strip()
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    try:
-        if remote_client is not None:
-            if callable(remote_client):
-                response = remote_client(texts)
-            else:
-                response = remote_client.post(
-                    url, json=payload, headers=headers, timeout=5.0
-                )
-            if inspect.isawaitable(response):
-                response = await response
-            if hasattr(response, "raise_for_status"):
-                response.raise_for_status()
-            return _parse_remote_embeddings(response)
-
-        try:
-            import httpx
-        except Exception:
-            return None
-        async with httpx.AsyncClient(timeout=5.0) as http_client:
-            response = await http_client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            return _parse_remote_embeddings(response)
+        _LOCAL_EMBEDDING_FUNCTION = build_embedding_function(model_name)
     except Exception as exc:
-        logger.warning("远程 Embedding 失败，使用本地哈希向量: %s", exc)
+        _LOCAL_EMBEDDING_INIT_FAILED = True
+        logger.warning("本地 BGE Embedding 初始化失败，使用哈希向量降级: %s", exc)
+    return _LOCAL_EMBEDDING_FUNCTION
+
+
+def _encode_local_embeddings(texts: List[str]) -> Optional[List[List[float]]]:
+    """使用知识库同款 BGE 编码文本；返回非法结果时交给降级链路。"""
+    embedding_function = _get_local_embedding_function()
+    if embedding_function is None:
+        return None
+    try:
+        if hasattr(embedding_function, "embed_documents"):
+            vectors = embedding_function.embed_documents(texts)
+        elif callable(embedding_function):
+            vectors = embedding_function(texts)
+        else:
+            return None
+        if not isinstance(vectors, list) or len(vectors) != len(texts):
+            return None
+        if not all(isinstance(vector, (list, tuple)) for vector in vectors):
+            return None
+        return [[float(value) for value in vector] for vector in vectors]
+    except Exception as exc:
+        logger.warning("本地 BGE Embedding 编码失败，使用哈希向量降级: %s", exc)
         return None
 
 
 async def _recognize_with_embedding(
     message: str,
-    remote_client: Any = None,
 ) -> EmbeddingIntentResult:
-    """返回最佳模板匹配，优先远程向量，失败时本地降级。
+    """返回最佳模板匹配，优先本地 BGE，失败时保留哈希降级。
 
     Args:
         message: 与意图模板库比较的用户消息。
-        remote_client: 可选的远程 Embedding 适配器。
-
     Returns:
         相似度最高的 ``EmbeddingIntentResult``。
     """
@@ -618,13 +655,12 @@ async def _recognize_with_embedding(
     ]
     template_texts = [text for _, text in flattened_templates]
     all_texts = template_texts + [message or ""]
-    remote_vectors = await _fetch_remote_embeddings(all_texts, remote_client)
-    local_fallback = not remote_vectors or len(remote_vectors) != len(all_texts)
-    vectors = (
-        [_hash_ngram_vector(text) for text in all_texts]
-        if local_fallback
-        else remote_vectors
-    )
+    vectors = await asyncio.to_thread(_encode_local_embeddings, all_texts)
+    vector_source = "local_bge"
+    local_fallback = not vectors or len(vectors) != len(all_texts)
+    if local_fallback:
+        vectors = [_hash_ngram_vector(text) for text in all_texts]
+        vector_source = "hash_ngram"
 
     query_vector = vectors[-1]
     template_scores = [
@@ -644,8 +680,14 @@ async def _recognize_with_embedding(
         score=min(1.0, max(0.0, float(best_score))),
         success=True,
         local_fallback=local_fallback,
-        reasoning="本地 1/2/3-gram MD5 向量" if local_fallback else "远程 Embedding 向量",
-        diagnostics={"embedding_model": os.getenv("EMBEDDING_MODEL", EMBEDDING_MODEL)},
+        reasoning={
+            "local_bge": "本地 BGE 向量",
+            "hash_ngram": "本地 1/2/3-gram MD5 向量",
+        }[vector_source],
+        diagnostics={
+            "embedding_model": os.getenv("CUSTOMEROPS_EMBEDDING_MODEL", EMBEDDING_MODEL),
+            "embedding_source": vector_source,
+        },
     )
 
 
@@ -717,14 +759,8 @@ SPECIFIC_PATTERNS: Dict[IntentCategory, Tuple[str, ...]] = {
         r"\bcrash\b",
         r"\bserver\s+error\b",
     ),
-    IntentCategory.HUMAN_HANDOFF: (
-        "转人工",
-        "人工客服",
-        "人工处理",
-        "人工介入",
-        "升级人工",
-        "找人工",
-        r"\bsupervisor\b",
+    IntentCategory.HUMAN_HANDOFF: tuple(
+        load_handoff_urgency_config()["handoff_policy"]["explicit_request_phrases"]
     ),
 }
 
@@ -797,38 +833,41 @@ GENERIC_PATTERNS: Dict[IntentCategory, Tuple[str, ...]] = {
     ),
 }
 
+# 新注册表规则覆盖同名旧意图；旧规则仅保留兼容未迁移的历史输入。
+for _intent_id, _rules in PATTERN_MAPS.items():
+    _intent = IntentCategory(_intent_id)
+    SPECIFIC_PATTERNS[_intent] = tuple(_rules["exact"])
+    GENERIC_PATTERNS[_intent] = tuple(_rules["generic"])
+
+# 旧 Pattern 定义只保留源码历史痕迹，不进入当前运行候选集合。
+_ACTIVE_INTENT_IDS = set(LLM_INTENT_SCHEMA["enum"]) | {IntentCategory.HUMAN_HANDOFF.value, IntentCategory.OTHER.value}
+SPECIFIC_PATTERNS = {key: value for key, value in SPECIFIC_PATTERNS.items() if key.value in _ACTIVE_INTENT_IDS}
+GENERIC_PATTERNS = {key: value for key, value in GENERIC_PATTERNS.items() if key.value in _ACTIVE_INTENT_IDS}
+
 _SPECIFIC_PATTERNS = SPECIFIC_PATTERNS
 _GENERIC_PATTERNS = GENERIC_PATTERNS
 _SPECIFIC_INTENTS = frozenset(SPECIFIC_PATTERNS)
 _GENERIC_INTENTS = frozenset(GENERIC_PATTERNS)
 
-_URGENCY_KEYWORDS: Dict[UrgencyLevel, Tuple[str, ...]] = {
-    UrgencyLevel.CRITICAL: ("紧急", "emergency", "urgent", "asap", "立刻"),
-    UrgencyLevel.HIGH: ("今天", "马上", "尽快", "hurry", "now"),
-    UrgencyLevel.MEDIUM: ("这周", "soon", "快点"),
-}
-
-_ENTITY_KEYS = ("order_id", "product", "date", "amount", "error_code")
+_ENTITY_KEYS = (
+    "order_id", "product_name", "sku", "shade", "quantity", "symptom",
+    "symptom_area", "onset_time", "stopped_use", "medical_visit", "missing_item",
+    "wrong_item", "damaged_area", "tracking_no", "return_reason", "opened_or_used",
+    "refund_amount", "price_difference",
+)
 _ORDER_ID_RE = re.compile(
-    r"(?:订单号|订单编号|order(?:[_\s-]?id)?|order\s+(?:number|no)|#)"
+    # 兼容消费者常说的“订单 SC-...”以及“订单号/订单编号 SC-...”，
+    # 但不把普通数字或正文中的“订单”误当成订单号。
+    r"(?:订单(?:号|编号)?|order(?:[_\s-]?id)?|order\s+(?:number|no)|#)"
     r"\s*[:：#]?\s*([A-Za-z0-9][A-Za-z0-9_-]{3,31})",
     re.IGNORECASE,
 )
-_DATE_RE = re.compile(
-    r"(?:\d{4}[-/.年]\d{1,2}[-/.月]\d{1,2}日?|"
-    r"今天|明天|昨天|近一周|最近一周|本周|这周|上周|下周)"
-)
-_AMOUNT_RE = re.compile(
+_MONEY_RE = re.compile(
     r"(?:[¥￥]\s*\d+(?:\.\d{1,2})?|"
     r"\d+(?:\.\d{1,2})?\s*(?:元|块|人民币|rmb|cny|usd|美元)|"
     r"(?:rmb|cny|usd)\s*\d+(?:\.\d{1,2})?)",
     re.IGNORECASE,
 )
-_LABELED_ERROR_CODE_RE = re.compile(
-    r"(?:error(?:[_\s-]?code)?|错误码|状态码|http)\s*[:：#]?\s*([45]\d{2})\b",
-    re.IGNORECASE,
-)
-_STANDALONE_ERROR_CODE_RE = re.compile(r"\b[45]\d{2}\b")
 
 
 def _pattern_matches(pattern: str, message: str) -> bool:
@@ -841,7 +880,16 @@ def _pattern_matches(pattern: str, message: str) -> bool:
     Returns:
         规则存在时返回 ``True``。
     """
-    return re.search(pattern, message, flags=re.IGNORECASE) is not None
+    matches = list(re.finditer(pattern, message, flags=re.IGNORECASE))
+    if not matches:
+        return False
+    # 先处理局部否定，避免“我不要退款，只换货”被退款关键词误路由。
+    negation = re.compile(r"(?:不|不要|无需|不是|并非|没|没有|不想)\s*(?:去|申请|办理|要|想)?$")
+    for match in matches:
+        prefix = message[max(0, match.start() - 8):match.start()]
+        if not negation.search(prefix):
+            return True
+    return False
 
 
 def _pattern_score(hits: int) -> float:
@@ -941,40 +989,140 @@ def _unique(values: List[str]) -> List[str]:
 
 
 def extract_entities(message: str) -> Dict[str, List[str]]:
-    """抽取意图契约规定的五类事实实体字段。
+    """抽取美妆意图契约规定的业务实体字段。
 
     Args:
-        message: 可能包含订单、日期、金额或错误码的用户消息。
+        message: 可能包含订单、商品、物流、使用不适或售后信息的用户消息。
 
     Returns:
-        严格包含 ``order_id``、``product``、``date``、``amount``、``error_code``
-        五个 key 的字典；商品词表尚未实现，因此 product 始终为空列表。
+        严格包含当前美妆注册表使用的实体 key，不返回旧技术或账单字段。
     """
     text = message or ""
-    labeled_codes = _LABELED_ERROR_CODE_RE.findall(text)
-    standalone_codes = _STANDALONE_ERROR_CODE_RE.findall(text)
-    return {
+    refund_requested = bool(re.search(r"退款|退货|退掉|退钱", text))
+    use_markers = r"用了|使用了|用过|使用过|使用后|用后|连续用"
+    onset_match = re.search(
+        r"第一天|第[二三四五六七八九十\d]+天|用后\s*[一二两三四五六七八九十\d]+\s*[天小时分钟日]",
+        text,
+    )
+    if onset_match:
+        onset_time = [onset_match.group(0)]
+    else:
+        onset_time = _unique(re.findall(r"(用后\s*[一二两三四五六七八九十\d]+\s*[天小时分钟日])", text))
+
+    stopped_use: List[str] = []
+    if re.search(r"目前没有在使用|现在没有在使用|已经停用|已停用|停用了|停止使用|不再使用", text):
+        stopped_use = ["已停用"]
+    elif re.search(r"还在使用|仍在使用|还在用|仍在用|继续使用|继续用", text):
+        stopped_use = ["还在使用"]
+
+    main_item_text = re.sub(r"[^，。；！？\n]*(?:小样|赠品)[^，。；！？\n]*", "", text)
+    opened_or_used: List[str] = []
+    if re.search(use_markers, main_item_text):
+        opened_or_used = ["已使用"]
+    elif re.search(r"(?:已拆封未使用|拆封但没用|开封但没用|开封未使用|拆封未用|(?:拆封|开封).{0,6}(?:未使用|没有使用|没使用|没用|未用|尚未使用))", main_item_text):
+        opened_or_used = ["已拆封未使用"]
+    elif re.search(r"(?:正装|商品|产品)?(?:未拆封|没有拆封|没拆封|未拆|还没拆)", main_item_text):
+        opened_or_used = ["未拆封"]
+    elif re.search(r"(?:正装|商品|产品)?(?:已经拆封|已拆封|已经开封|已开封|开封了|拆开了)|(?:正装|商品|产品)(?:已|已经)?(?:拆封|开封)", main_item_text):
+        opened_or_used = ["已拆封，使用情况不确定"]
+
+    gift_opened_or_used: List[str] = []
+    gift_text = " ".join(re.findall(r"[^，。；！？\n]*(?:小样|赠品)[^，。；！？\n]*", text))
+    if gift_text and re.search(use_markers, gift_text):
+        gift_opened_or_used = ["已使用"]
+    elif gift_text and re.search(r"(?:拆封未使用|拆封但没用|开封未用)", gift_text):
+        gift_opened_or_used = ["已拆封未使用"]
+    elif gift_text and re.search(r"(?:未拆封|没拆封|没有拆封|没开封|没拆|未拆|还没拆)", gift_text):
+        gift_opened_or_used = ["未拆封"]
+    elif gift_text and re.search(r"(?:已经拆封|已拆封|已经开封|已开封|开封了|拆开了)", gift_text):
+        gift_opened_or_used = ["已拆封，使用情况不确定"]
+
+    medical_visit: List[str] = []
+    if re.search(r"已就医|看过医生|去过医院|已经去医院", text):
+        medical_visit = ["已就医"]
+    elif re.search(r"没就医|未就医|没有就医|没去医院|没有去医院", text):
+        medical_visit = ["没就医"]
+
+    return_scope: List[str] = []
+    if re.search(r"只退(?:正装|商品)|仅退(?:正装|商品)|正装单独退|小样不退|赠品不退", text):
+        return_scope = ["只退正装"]
+    elif re.search(r"只退(?:小样|赠品)|仅退(?:小样|赠品)", text):
+        return_scope = ["只退赠品/小样"]
+    elif re.search(r"分开退|分开处理|分别退款|正装和小样分开", text):
+        return_scope = ["正装和赠品分开处理"]
+    elif re.search(r"整单|全单|整套|全部退|一起退|商品和赠品(?:一起|都)退|正装和小样(?:一起|都)退", text):
+        return_scope = ["整单退款"]
+
+    return_reason: List[str] = []
+    if refund_requested:
+        if re.search(r"买错|买重|拍错|下错单", text):
+            return_reason = ["买错/重复购买"]
+        elif re.search(r"红肿|脸红|泛红|发红|起疹|刺痛|发痒|瘙痒|脱皮|过敏|肿胀|不舒服|不适", text):
+            return_reason = ["使用不适"]
+        elif re.search(r"不喜欢|不想要|不需要|不合适|不适合", text):
+            return_reason = ["不喜欢/不需要"]
+        else:
+            reason_match = re.search(r"(?:退款|退货)(?:的)?(?:原因|理由)(?:是|为|：|:)\s*([^，。；！？\n]+)", text)
+            if reason_match:
+                return_reason = [reason_match.group(1).strip()]
+
+    intercept_or_change: List[str] = []
+    if re.search(r"拦截.{0,6}(?:并|和).{0,4}(?:改地址|改址)|(?:改地址|改址).{0,6}(?:并|和).{0,4}拦截", text):
+        intercept_or_change = ["拦截并改址"]
+    elif re.search(r"拦截(?:一下|包裹|快递)?", text):
+        intercept_or_change = ["拦截包裹"]
+    elif re.search(r"改地址|修改地址|改址|换地址", text):
+        intercept_or_change = ["修改地址"]
+
+    signed_info: List[str] = []
+    if re.search(r"显示签收.{0,8}(?:没收到|没有收到|未收到)|签收了.{0,8}(?:没收到|没有收到|未收到)", text):
+        signed_info = ["物流显示签收，消费者未收到"]
+    elif re.search(r"本人已签收|我已签收|已经签收|已签收", text):
+        signed_info = ["消费者确认已签收"]
+
+    entities = {
         "order_id": _unique(_ORDER_ID_RE.findall(text)),
-        "product": [],
-        "date": _unique(_DATE_RE.findall(text)),
-        "amount": _unique(_AMOUNT_RE.findall(text)),
-        "error_code": _unique(labeled_codes + standalone_codes),
+        "product_name": [],
+        "sku": [],
+        "shade": _unique(re.findall(r"(?:色号|色號)\s*([A-Za-z0-9一二三四五六七八九十-]+)", text, re.IGNORECASE)),
+        "quantity": _unique(re.findall(r"(?:缺少|漏发|漏了|少了|数量)\s*(\d+|[一二两三四五六七八九十]+)\s*(?:件|个|支|瓶)?", text)),
+        "symptom": _unique(re.findall(r"(红肿|脸红|泛红|发红|起疹|刺痛|发痒|瘙痒|脱皮|过敏|肿胀|呼吸困难)", text)),
+        "symptom_area": _unique(re.findall(r"(全脸|脸部|脸|眼周|眼睛|嘴唇|手部|颈部|身体)", text)),
+        "onset_time": onset_time,
+        "stopped_use": stopped_use,
+        "medical_visit": medical_visit,
+        "signed_info": signed_info,
+        "intercept_or_change": intercept_or_change,
+        "missing_item": _unique(re.findall(r"(?:漏发|少发|漏了|少了|缺少)\s*([^，。！？\s]{1,20})", text)),
+        "wrong_item": _unique(re.findall(r"(?:错发|发错)\s*([^，。！？\s]{1,20})", text)),
+        "damaged_area": _unique(re.findall(r"(瓶身|包装|外盒|泵头|瓶口|漏液|破裂|压坏)", text)),
+        "tracking_no": _unique(re.findall(r"(?:物流单号|运单号|快递单号)\s*[:：]?\s*([A-Za-z0-9-]{6,32})", text, re.IGNORECASE)),
+        "return_reason": return_reason,
+        "opened_or_used": opened_or_used,
+        "return_scope": return_scope,
+        "gift_opened_or_used": gift_opened_or_used,
+        "refund_amount": _unique(_MONEY_RE.findall(text)),
+        "price_difference": _unique(re.findall(r"(?:差价|补差)\s*[:：]?\s*([¥￥]?\s*\d+(?:\.\d{1,2})?)", text, re.IGNORECASE)),
     }
+    return entities
 
 
-def _contains_urgency_keyword(message: str, keyword: str) -> bool:
-    """匹配紧急度关键词，并为 ASCII 词处理单词边界。
+_EMOTION_MARKERS = {
+    "threatening": ("12315", "曝光", "起诉", "平台介入", "平台投诉", "限期", "最后通牒"),
+    "angry": ("气死", "什么垃圾", "骗子", "骗人", "赖账", "踢皮球", "滚", "愤怒"),
+    "upset": ("投诉", "太差", "怎么还", "一直没", "第3次", "第三次", "没人理", "无语", "失望", "敷衍"),
+    "anxious": ("担心", "着急", "害怕", "怎么办", "赶紧", "严重吗", "会不会", "来得及"),
+}
 
-    Args:
-        message: 待检查的用户消息。
-        keyword: 中文或 ASCII 紧急度关键词。
 
-    Returns:
-        关键词存在时返回 ``True``。
-    """
-    if keyword.isascii() and keyword.replace("_", "").replace("-", "").isalnum():
-        return re.search(rf"\b{re.escape(keyword)}\b", message, re.IGNORECASE) is not None
-    return keyword.casefold() in message.casefold()
+def detect_emotion(message: str) -> Tuple[str, float, List[str]]:
+    """输出五档情绪标签；模型只提供证据时也必须由此固定顺序归类。"""
+    text = message or ""
+    for label in ("threatening", "angry", "upset", "anxious"):
+        evidence = [word for word in _EMOTION_MARKERS[label] if word in text]
+        if evidence:
+            return label, min(1.0, 0.45 + 0.15 * len(evidence)), evidence
+    return "calm", 0.0, []
 
 
 def calculate_urgency(
@@ -990,15 +1138,16 @@ def calculate_urgency(
     Returns:
         按优先级链选出的确定性 ``UrgencyLevel``。
     """
-    text = message or ""
-    for level in (UrgencyLevel.CRITICAL, UrgencyLevel.HIGH, UrgencyLevel.MEDIUM):
-        if any(_contains_urgency_keyword(text, word) for word in _URGENCY_KEYWORDS[level]):
-            return level
-    if intent == IntentCategory.HUMAN_HANDOFF:
-        return UrgencyLevel.HIGH
-    if intent == IntentCategory.COMPLAINT:
-        return UrgencyLevel.MEDIUM
-    return UrgencyLevel.LOW
+    config = load_handoff_urgency_config()
+    intent_value = str(getattr(intent, "value", intent) or "")
+    priority = score_temporary_urgency(message or "", config, intent=intent_value)["priority"]
+    # 普通业务路由紧急度和客服队列优先级使用同一套风险信号，保持既有枚举契约。
+    return {
+        "P0": UrgencyLevel.CRITICAL,
+        "P1": UrgencyLevel.HIGH,
+        "P2": UrgencyLevel.MEDIUM,
+        "P3": UrgencyLevel.LOW,
+    }.get(str(priority), UrgencyLevel.LOW)
 
 
 def apply_500_override(
@@ -1027,14 +1176,33 @@ apply_status_code_override = apply_500_override
 
 
 _INTENT_GROUPS: Dict[IntentCategory, str] = {
-    IntentCategory.ORDER_STATUS: "query",
-    IntentCategory.LOGISTICS: "query",
-    IntentCategory.REFUND: "billing",
-    IntentCategory.INVOICE: "billing",
-    IntentCategory.PAYMENT_ISSUE: "billing",
-    IntentCategory.ACCOUNT_SECURITY: "account",
-    IntentCategory.TECHNICAL_LOGIN: "technical",
-    IntentCategory.TECHNICAL_CRASH: "technical",
+    IntentCategory.ORDER_STATUS: "order",
+    IntentCategory.LOGISTICS: "order",
+    IntentCategory.REFUND: "after_sales",
+    IntentCategory.INVOICE: "after_sales",
+    IntentCategory.PAYMENT_ISSUE: "after_sales",
+    IntentCategory.ACCOUNT_SECURITY: "consult",
+    IntentCategory.TECHNICAL_LOGIN: "consult",
+    IntentCategory.TECHNICAL_CRASH: "consult",
+    IntentCategory.INGREDIENT_FIT: "consult",
+    IntentCategory.SHADE_MATCH: "consult",
+    IntentCategory.USAGE_HOWTO: "consult",
+    IntentCategory.PRODUCT_INFO: "consult",
+    IntentCategory.PROMO_RULES: "consult",
+    IntentCategory.PREGNANCY_SAFETY: "consult",
+    IntentCategory.ORDER_STATUS_BEAUTY: "order",
+    IntentCategory.LOGISTICS_STALLED: "order",
+    IntentCategory.SIGNED_NOT_RECEIVED: "order",
+    IntentCategory.INTERCEPT_CHANGE_ADDRESS: "order",
+    IntentCategory.MISSING_ITEM: "order",
+    IntentCategory.WRONG_ITEM: "order",
+    IntentCategory.DAMAGED_ON_ARRIVAL: "order",
+    IntentCategory.RETURN_REFUND: "after_sales",
+    IntentCategory.ADVERSE_REACTION: "after_sales",
+    IntentCategory.SUSPECTED_ABNORMAL_REFUND: "after_sales",
+    IntentCategory.PRICE_PROTECTION: "after_sales",
+    IntentCategory.REFUND_NOT_RECEIVED: "after_sales",
+    IntentCategory.SHIPPING_FEE_REIMBURSEMENT: "after_sales",
 }
 
 
@@ -1076,11 +1244,39 @@ def _intent_domain(intent: IntentCategory) -> str:
         ``technical``、``billing``、``escalation`` 或 ``general``。
     """
     if intent in {
+        IntentCategory.INGREDIENT_FIT,
+        IntentCategory.SHADE_MATCH,
+        IntentCategory.USAGE_HOWTO,
+        IntentCategory.PRODUCT_INFO,
+        IntentCategory.PROMO_RULES,
+        IntentCategory.PREGNANCY_SAFETY,
+    }:
+        return "consult"
+    if intent in {
+        IntentCategory.ORDER_STATUS_BEAUTY,
+        IntentCategory.LOGISTICS_STALLED,
+        IntentCategory.SIGNED_NOT_RECEIVED,
+        IntentCategory.INTERCEPT_CHANGE_ADDRESS,
+        IntentCategory.MISSING_ITEM,
+        IntentCategory.WRONG_ITEM,
+        IntentCategory.DAMAGED_ON_ARRIVAL,
+    }:
+        return "order"
+    if intent in {
+        IntentCategory.RETURN_REFUND,
+        IntentCategory.ADVERSE_REACTION,
+        IntentCategory.SUSPECTED_ABNORMAL_REFUND,
+        IntentCategory.PRICE_PROTECTION,
+        IntentCategory.REFUND_NOT_RECEIVED,
+        IntentCategory.SHIPPING_FEE_REIMBURSEMENT,
+    }:
+        return "after_sales"
+    if intent in {
         IntentCategory.TECHNICAL,
         IntentCategory.TECHNICAL_LOGIN,
         IntentCategory.TECHNICAL_CRASH,
     }:
-        return "technical"
+        return "order"
     if intent in {
         IntentCategory.BILLING,
         IntentCategory.ACCOUNT,
@@ -1089,10 +1285,10 @@ def _intent_domain(intent: IntentCategory) -> str:
         IntentCategory.INVOICE,
         IntentCategory.PAYMENT_ISSUE,
     }:
-        return "billing"
+        return "after_sales"
     if intent is IntentCategory.HUMAN_HANDOFF:
         return "escalation"
-    return "general"
+    return "consult"
 
 
 # 这些词只在子句被当作独立复合诉求评估时使用；这样可以提升 scoped split
@@ -1286,7 +1482,7 @@ def detect_compound_intents(
             "domain": item["domain"],
             "intent": item["intent"],
             "confidence": 0.75 if item["specific"] else 0.55,
-            "knowledge_required": item["domain"] != "general",
+            "knowledge_required": item["domain"] != "consult",
         }
         for index, item in enumerate(clause_matches, start=1)
     ]
@@ -1309,23 +1505,6 @@ def detect_compound_intents(
     if diagnostics["sub_requests"]:
         diagnostics["primary_sub_request_id"] = diagnostics["sub_requests"][0]["id"]
     return secondary, trigger, diagnostics
-
-
-def _detect_secondary_intents(
-    message: str,
-    primary_intent: IntentCategory,
-) -> Tuple[List[IntentCategory], str]:
-    """兼容旧调用方的二元复合意图返回契约。
-
-    Args:
-        message: 原始用户消息。
-        primary_intent: 已确定的主意图。
-
-    Returns:
-        辅助意图列表和触发词。
-    """
-    secondary, trigger, _ = detect_compound_intents(message, primary_intent)
-    return secondary, trigger
 
 
 def build_scoped_retrieval_queries(
@@ -1370,7 +1549,7 @@ def _normalize_structured_sub_requests(value: Any) -> List[Dict[str, Any]]:
         text = str(item.get("text") or "").strip()
         domain = str(item.get("domain") or "").strip().lower()
         intent = _coerce_intent(item.get("intent"))
-        if not text or domain not in {"general", "technical", "billing"}:
+        if not text or domain not in {"consult", "order", "after_sales"}:
             continue
         if _intent_domain(intent) != domain:
             continue
@@ -1385,7 +1564,7 @@ def _normalize_structured_sub_requests(value: Any) -> List[Dict[str, Any]]:
                 "domain": domain,
                 "intent": intent.value,
                 "confidence": confidence,
-                "knowledge_required": domain != "general",
+                "knowledge_required": domain != "consult",
             }
         )
     return normalized
@@ -1511,8 +1690,13 @@ def _normalize_llm_source(value: Any) -> LLMIntentResult:
         归一化后的 LLM 结果，异常结构转为失败结果。
     """
     if isinstance(value, LLMIntentResult):
+        if value.intent.value not in _ACTIVE_INTENT_IDS:
+            return _failed_llm_result(f"LLM 返回了未注册的美妆意图: {value.intent.value}")
         return value
     if isinstance(value, dict):
+        raw_intent = str(value.get("intent", ""))
+        if raw_intent not in _ACTIVE_INTENT_IDS:
+            return _failed_llm_result(f"LLM 返回了未注册的美妆意图: {raw_intent or 'empty'}")
         intent = _coerce_intent(value.get("intent"))
         failed = bool(value.get("failed", False))
         success = bool(value.get("success", not failed))
@@ -1536,8 +1720,23 @@ def _normalize_embedding_source(value: Any) -> EmbeddingIntentResult:
         归一化后的 Embedding 结果，异常结构转为失败结果。
     """
     if isinstance(value, EmbeddingIntentResult):
+        if value.intent.value not in _ACTIVE_INTENT_IDS:
+            return EmbeddingIntentResult(
+                intent=IntentCategory.OTHER,
+                score=0.0,
+                success=False,
+                reasoning=f"Embedding 返回了未注册的美妆意图: {value.intent.value}",
+            )
         return value
     if isinstance(value, dict):
+        raw_intent = str(value.get("intent", ""))
+        if raw_intent not in _ACTIVE_INTENT_IDS:
+            return EmbeddingIntentResult(
+                intent=IntentCategory.OTHER,
+                score=0.0,
+                success=False,
+                reasoning=f"Embedding 返回了未注册的美妆意图: {raw_intent or 'empty'}",
+            )
         intent = _coerce_intent(value.get("intent"))
         score = _bounded_score(value.get("score", value.get("confidence", 0.0)))
         explicit_success = value.get("success")
@@ -1611,8 +1810,6 @@ async def recognize_intent(
         装配了意图、置信度、实体、紧急度和诊断信息的 ``IntentResult``。
     """
     started_at = time.perf_counter()
-    llm_task = asyncio.create_task(_recognize_with_llm(message, history))
-    embedding_task = asyncio.create_task(_recognize_with_embedding(message))
     try:
         pattern_result = _pattern_recognize(message)
     except Exception as exc:
@@ -1624,6 +1821,57 @@ async def recognize_intent(
             "specific_intent": IntentCategory.OTHER,
             "specific_score": 0.0,
         }
+
+    # 常规且证据明确的问题走本地快路径，不等待远程 LLM 或 BGE。
+    fast_intents = {
+        IntentCategory.INGREDIENT_FIT, IntentCategory.SHADE_MATCH,
+        IntentCategory.USAGE_HOWTO, IntentCategory.PRODUCT_INFO,
+        IntentCategory.PROMO_RULES, IntentCategory.ORDER_STATUS_BEAUTY,
+        IntentCategory.LOGISTICS_STALLED, IntentCategory.MISSING_ITEM,
+        IntentCategory.WRONG_ITEM, IntentCategory.DAMAGED_ON_ARRIVAL,
+        IntentCategory.RETURN_REFUND, IntentCategory.REFUND_NOT_RECEIVED,
+    }
+    fast_intent = _coerce_intent(pattern_result.get("specific_intent"))
+    fast_score = _bounded_score(pattern_result.get("specific_score", 0.0))
+    # 特异 Pattern 本身就是业务词组的精确命中；单条命中即允许快路径，
+    # 泛化 Pattern 仍然不会绕过模型，避免把模糊表达误判成业务意图。
+    if fast_intent in fast_intents and fast_score >= 0.5:
+        # 快路径只跳过 LLM/Embedding，不跳过复合请求拆分；否则主意图虽然快速命中，
+        # 其他业务域诉求会从 Agent Fan-out 和工单子任务中消失。
+        compound = resolve_compound_intents(message, fast_intent)
+        emotion, emotion_intensity, emotion_evidence = detect_emotion(message)
+        diagnostics = {
+            "fast_path": True,
+            "fast_path_reason": "specific_pattern",
+            "final_intent": fast_intent.value,
+            "final_confidence": fast_score,
+            "source_intents": {"pattern": fast_intent.value},
+            "source_scores": {"pattern": fast_score},
+            "knowledge_required": fast_intent not in {IntentCategory.ORDER_STATUS_BEAUTY, IntentCategory.LOGISTICS_STALLED},
+        }
+        diagnostics.update(compound["diagnostics"])
+        diagnostics["scoped_retrieval_queries"] = compound["scoped_retrieval_queries"]
+        return IntentResult(
+            intent=fast_intent,
+            confidence=fast_score,
+            urgency=calculate_urgency(message, fast_intent),
+            intent_group=_intent_group(fast_intent),
+            entities=extract_entities(message),
+            reasoning="采用明确的本地业务规则，无需等待模型",
+            latency_ms=max(0.0, round((time.perf_counter() - started_at) * 1000, 3)),
+            source_scores={"pattern": fast_score},
+            source_intents={"pattern": fast_intent.value},
+            secondary_intents=list(compound["secondary_intents"]),
+            compound_trigger=str(compound["compound_trigger"] or ""),
+            intent_diagnostics=diagnostics,
+            sub_requests=list(compound["diagnostics"].get("sub_requests") or []),
+            emotion=emotion,
+            emotion_intensity=emotion_intensity,
+            emotion_evidence=emotion_evidence,
+        )
+
+    llm_task = asyncio.create_task(_recognize_with_llm(message, history))
+    embedding_task = asyncio.create_task(_recognize_with_embedding(message))
 
     llm_raw, embedding_raw = await asyncio.gather(
         llm_task,
@@ -1736,12 +1984,9 @@ async def recognize_intent(
                 final_confidence = max(fused_confidence, specific_score)
                 diagnostics["refined_from"] = candidate.value
 
-    final_intent, final_confidence = apply_500_override(
-        message,
-        final_intent,
-        final_confidence,
-    )
-    diagnostics["status_code_override"] = final_intent is IntentCategory.TECHNICAL_CRASH and "500" in (message or "")
+    # 500/technical_crash 属于旧通用客服域，不在当前美妆 19 意图注册表内；
+    # 不允许旧覆盖规则绕过已确认的美妆意图边界。
+    diagnostics["status_code_override"] = False
     diagnostics["final_intent"] = final_intent.value
     normalized_confidence = _bounded_score(round(final_confidence, 6))
     diagnostics["final_confidence"] = normalized_confidence
@@ -1750,9 +1995,62 @@ async def recognize_intent(
         llm.diagnostics.get("llm_sub_requests")
     ) if llm.success and llm.diagnostics.get("llm_is_compound") else []
     compound = resolve_compound_intents(message, final_intent, structured_sub_requests)
+    explicit_handoff = is_explicit_handoff_requested(
+        message, load_handoff_urgency_config()
+    )
+    diagnostics["explicit_handoff_requested"] = explicit_handoff
+    # 复合请求已经成功拆出结构化子请求时，优先使用第一个子请求作为主路由锚点。
+    # 顶层 human_handoff 只有在用户明确表达人工诉求时才允许覆盖业务子请求；
+    # CRITICAL 则交给后续路由安全红线处理。
+    if structured_sub_requests and len(structured_sub_requests) >= 2:
+        if not explicit_handoff:
+            candidate_intent = _coerce_intent(structured_sub_requests[0].get("intent"))
+            if candidate_intent not in {
+                IntentCategory.OTHER,
+                IntentCategory.HUMAN_HANDOFF,
+            }:
+                if final_intent is IntentCategory.HUMAN_HANDOFF:
+                    diagnostics["compound_top_level_handoff_ignored"] = True
+                final_intent = candidate_intent
+                final_confidence = max(
+                    normalized_confidence,
+                    float(structured_sub_requests[0].get("confidence") or 0.55),
+                )
+                normalized_confidence = _bounded_score(round(final_confidence, 6))
+                diagnostics["final_intent"] = final_intent.value
+                diagnostics["final_confidence"] = normalized_confidence
+                diagnostics["compound_primary_subrequest_override"] = candidate_intent.value
+                compound = resolve_compound_intents(
+                    message,
+                    final_intent,
+                    structured_sub_requests,
+                )
+    if final_intent is IntentCategory.HUMAN_HANDOFF and not explicit_handoff:
+        # Why：模型可能把强烈情绪或风险误分类成“转人工”；实际转接只由明确请求触发。
+        candidates = [specific_intent]
+        candidates.extend(
+            _coerce_intent(item.get("intent"))
+            for item in structured_sub_requests
+            if isinstance(item, Mapping)
+        )
+        candidate_intent = next(
+            (
+                item for item in candidates
+                if item not in {IntentCategory.OTHER, IntentCategory.HUMAN_HANDOFF}
+                and item.value in {entry["intent_id"] for entry in REGISTRY_INTENTS}
+            ),
+            IntentCategory.OTHER,
+        )
+        final_intent = candidate_intent
+        final_confidence = specific_score if candidate_intent is specific_intent else 0.0
+        normalized_confidence = _bounded_score(round(final_confidence, 6))
+        diagnostics["unrequested_handoff_prediction_demoted"] = True
+        diagnostics["final_intent"] = final_intent.value
+        diagnostics["final_confidence"] = normalized_confidence
+        compound = resolve_compound_intents(message, final_intent, structured_sub_requests)
     # 复合消息若融合结果退化为 OTHER，优先使用第一个明确业务子请求作为主路由，
     # 再按该主域重新计算 secondary，避免整条请求直接进入澄清分支。
-    if final_intent in {
+    if not structured_sub_requests and final_intent in {
         IntentCategory.OTHER,
         IntentCategory.QUERY,
         IntentCategory.REQUEST,
@@ -1792,6 +2090,7 @@ async def recognize_intent(
     else:
         reasoning = "采用融合后的意图结果"
 
+    emotion, emotion_intensity, emotion_evidence = detect_emotion(message)
     return IntentResult(
         intent=final_intent,
         confidence=normalized_confidence,
@@ -1806,4 +2105,7 @@ async def recognize_intent(
         compound_trigger=compound["compound_trigger"],
         intent_diagnostics=diagnostics,
         sub_requests=list(compound["diagnostics"].get("sub_requests") or []),
+        emotion=emotion,
+        emotion_intensity=emotion_intensity,
+        emotion_evidence=emotion_evidence,
     )

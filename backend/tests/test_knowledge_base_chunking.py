@@ -14,15 +14,15 @@ from scripts.init_knowledge_base import (
 class ChunkCollection:
     """保存 chunk 并按查询词模拟 Chroma 召回。"""
 
-    def __init__(self) -> None:
-        """初始化空 collection。"""
+    def __init__(self, embedding_texts) -> None:
+        self.embedding_texts = embedding_texts
         self.rows = []
 
     def count(self) -> int:
         """返回已写入 chunk 数量。"""
         return len(self.rows)
 
-    def add(self, *, ids, documents, metadatas) -> None:
+    def add(self, *, ids, documents, metadatas, embeddings) -> None:
         """保存 KnowledgeBase 写入的文本、ID 和 metadata。"""
         self.rows.extend(
             {
@@ -33,9 +33,10 @@ class ChunkCollection:
             for item_id, document, metadata in zip(ids, documents, metadatas)
         )
 
-    def query(self, *, query_texts, n_results, include):
-        """按查询中的关键词匹配 chunk，并返回固定距离。"""
-        query_terms = [term for term in query_texts[0].split() if term]
+    def query(self, *, query_embeddings, n_results, include):
+        """根据显式向量还原测试查询，再模拟关键词召回。"""
+        query_text = self.embedding_texts[tuple(query_embeddings[0])]
+        query_terms = [term for term in query_text.split() if term]
         matches = [
             row
             for row in self.rows
@@ -67,24 +68,34 @@ class ChunkClient:
 
 def make_knowledge_base(monkeypatch) -> tuple[KnowledgeBase, ChunkCollection]:
     """创建不下载模型、不访问网络的 KnowledgeBase。"""
-    collection = ChunkCollection()
+    embedding_texts = {}
+    collection = ChunkCollection(embedding_texts)
+
+    def embed(texts):
+        vectors = []
+        for text in texts:
+            vector = [float(len(embedding_texts) + 1)]
+            embedding_texts[tuple(vector)] = text
+            vectors.append(vector)
+        return vectors
+
     monkeypatch.setattr(
         knowledge_base_module,
         "build_embedding_function",
-        lambda model: {"model": model, "device": "cpu"},
+        lambda model: embed,
     )
     return KnowledgeBase(client=ChunkClient(collection)), collection
 
 
-def test_six_documents_expand_to_header_aware_chunks(monkeypatch):
-    """六篇源文档应展开为聚焦语义 chunk，而不是退化为六片。"""
+def test_current_beauty_corpus_expands_to_header_aware_chunks(monkeypatch):
+    """当前 50+ 篇美妆知识源应展开为聚焦语义 chunk。"""
     documents = load_source_documents(DEFAULT_SOURCE_DIR)
     knowledge_base, collection = make_knowledge_base(monkeypatch)
 
     written = knowledge_base.add_documents(documents)
 
-    assert len(documents) == 6
-    assert 16 <= written <= 22
+    assert len(documents) >= 50
+    assert written > len(documents)
     assert written == len(collection.rows)
 
 
@@ -106,16 +117,18 @@ def test_chunks_have_breadcrumbs_bounds_and_complete_metadata(monkeypatch):
     )
 
 
-def test_401_query_recalls_its_dedicated_technical_chunk(monkeypatch):
-    """401 查询应聚焦 401 专属片段，而不是召回混合错误码长文档。"""
-    documents = load_source_documents(DEFAULT_SOURCE_DIR)
+def test_sensitive_skin_query_recalls_matching_beauty_product_chunk(monkeypatch):
+    """敏感肌咨询应召回对应产品资料，而不是旧的通用技术文档。"""
+    documents = [
+        item for item in load_source_documents(DEFAULT_SOURCE_DIR)
+        if "澄润屏障修护精华水" in item["title"]
+    ]
+    assert documents
     knowledge_base, _ = make_knowledge_base(monkeypatch)
     knowledge_base.add_documents(documents)
 
-    rows = knowledge_base.search("401 认证失败", top_k=5)
+    rows = knowledge_base.search("神经酰胺", top_k=5)
 
     assert rows
-    assert rows[0]["source_document_id"] == "technical_troubleshooting"
-    assert "401：认证失败" in rows[0]["content"]
-    assert "500：服务器错误" not in rows[0]["content"]
-    assert rows[0]["source_chunk_id"].startswith("technical_troubleshooting_chunk_")
+    assert "澄润屏障修护精华水" in rows[0]["title"]
+    assert "神经酰胺" in rows[0]["content"]

@@ -11,12 +11,15 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import inspect
+import json
 import math
+from pathlib import Path
 import re
 import uuid
 from numbers import Real
 from typing import Any, Callable, Dict, Mapping, Optional
 
+from agents.case_facts import CaseFacts
 
 Handler = Callable[..., Any]
 
@@ -177,18 +180,43 @@ async def inspect_request_context(
     }
 
 
+from intent.beauty_intent_ticket_registry import BEAUTY_INTENT_TICKET_BY_ID
+
+
 _REQUIRED_FIELDS_BY_INTENT: Dict[str, tuple[str, ...]] = {
-    "refund": ("order_id", "amount"),
-    "billing": ("order_id", "amount"),
-    "payment_issue": ("order_id", "amount"),
-    "invoice": ("order_id", "amount"),
-    "order_status": ("order_id",),
-    "logistics": ("order_id",),
-    "technical": ("error_code", "product"),
-    "technical_login": ("error_code",),
-    "technical_crash": ("error_code", "product"),
-    "account_security": ("date",),
+    intent_id: tuple(item["blocking_fields"])
+    for intent_id, item in BEAUTY_INTENT_TICKET_BY_ID.items()
 }
+
+_FIELD_LABELS = {
+    "order_id": "订单号",
+    "return_reason": "退货原因",
+    "opened_or_used": "商品拆封/使用状态",
+    "missing_item": "缺少的商品",
+    "quantity": "数量",
+    "wrong_item": "收到的商品",
+    "shade": "色号",
+    "damaged_area": "破损部位",
+    "symptom": "不适症状",
+    "tracking_no": "物流单号",
+    "signed_info": "签收情况",
+    "intercept_or_change": "拦截或改地址需求",
+    "medical_visit": "就医情况",
+    "refund_amount": "退款金额",
+    "price_difference": "价差",
+}
+_EMPTY_FIELD_VALUES = frozenset({
+    "", "unknown", "null", "none", "未知", "不清楚", "不确定", "不知道", "未提供", "待确认"
+})
+
+
+def _has_field_value(values: Any) -> bool:
+    items = values if isinstance(values, (list, tuple, set)) else [values]
+    return any(
+        value is not None
+        and str(value).strip().casefold() not in _EMPTY_FIELD_VALUES
+        for value in items
+    )
 
 
 async def suggest_required_fields(
@@ -199,33 +227,262 @@ async def suggest_required_fields(
 
     Args:
         params: 必须包含非空字符串字段 ``intent`` 的对象。
-        context: 保留参数，当前实现不读取用户画像或外部系统。
+        context: 当前请求的实体与 CaseFacts，只读取已在会话中出现的字段事实。
 
     Returns:
         包含 ``required_fields`` 与中文 ``suggestion`` 的字典；参数非法时返回
         ``success=False`` 的安全错误。
     """
 
-    del context  # 明确该工具不读取会话私有上下文，避免信息越界。
     if not isinstance(params, dict):
         return _error("工具参数必须是对象")
     intent = params.get("intent")
     if not isinstance(intent, str) or not intent.strip():
         return _error("intent 必须是非空字符串")
+    if not isinstance(context, Mapping) or not any(
+        key in context for key in ("entities", "case_facts")
+    ):
+        return _error("当前请求字段上下文不可用，无法判断哪些字段仍缺失")
 
-    normalized_intent = intent.strip().lower()
-    fields = list(_REQUIRED_FIELDS_BY_INTENT.get(normalized_intent, ()))
-    if fields:
-        field_text = "、".join(fields)
-        suggestion = f"建议用户补充订单或问题字段：{field_text}，以便继续只读核验。"
+    requested_intent = intent.strip().lower()
+    has_authoritative_intent_context = "intent_ids" in context or "intent" in context
+    context_intents = context.get("intent_ids")
+    if not isinstance(context_intents, (list, tuple)):
+        context_intents = [context.get("intent")]
+    active_intents = list(dict.fromkeys(
+        str(value).strip().lower()
+        for value in context_intents
+        if isinstance(value, str)
+        and value.strip().lower() in _REQUIRED_FIELDS_BY_INTENT
+    ))
+    # 上下文中的注册表 ID 是权威来源；模型传入的自然语言意图描述仅用于旧入口兼容。
+    if (
+        not active_intents
+        and not has_authoritative_intent_context
+        and requested_intent in _REQUIRED_FIELDS_BY_INTENT
+    ):
+        active_intents = [requested_intent]
+    if not active_intents:
+        return _error("当前意图无法映射到已注册的业务字段规则")
+
+    normalized_intent = active_intents[0]
+    required_fields = list(dict.fromkeys(
+        field
+        for active_intent in active_intents
+        for field in _REQUIRED_FIELDS_BY_INTENT.get(active_intent, ())
+    ))
+    facts = CaseFacts.from_dict(context.get("case_facts"))
+    effective_values = facts.effective_values(
+        context.get("entities") if isinstance(context.get("entities"), Mapping) else None
+    )
+    tracked_fields = list(dict.fromkeys(
+        required_fields
+        + [
+            field
+            for active_intent in active_intents
+            for field in BEAUTY_INTENT_TICKET_BY_ID[active_intent].get("ticket_fields", [])
+        ]
+        + list(effective_values)
+    ))
+    known_fields = {
+        field: list(effective_values[field])
+        for field in tracked_fields
+        if _has_field_value(effective_values.get(field, []))
+    }
+    missing_fields = [field for field in required_fields if field not in known_fields]
+    if missing_fields:
+        missing_labels = [
+            _FIELD_LABELS.get(field, field) for field in missing_fields
+        ]
+        known_labels = [
+            _FIELD_LABELS.get(field, field) for field in known_fields
+        ]
+        known_text = f"已从上下文取得：{'、'.join(known_labels)}；" if known_labels else ""
+        suggestion = (
+            f"{known_text}只建议补充仍缺少的字段：{'、'.join(missing_labels)}；"
+            "不要再次询问已取得的字段。"
+        )
+    elif required_fields:
+        suggestion = "该意图的必需字段已从上下文取得，不要重复追问，可继续核验或回答。"
     else:
-        suggestion = "当前意图暂无固定必填字段，建议用户补充问题细节。"
+        suggestion = "当前意图没有固定阻塞字段；只有处理问题确实需要且上下文缺少的信息才可追问。"
     return {
         "success": True,
         "intent": normalized_intent,
-        "required_fields": fields,
+        "intents": active_intents,
+        # 兼容旧消费者字段名；现在返回的明确是尚缺字段，而非全量必填字段。
+        "required_fields": missing_fields,
+        "missing_fields": missing_fields,
+        "known_fields": known_fields,
         "suggestion": suggestion,
     }
+
+
+async def lookup_order(params: Any, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """读取 Demo Order DB 中的订单事实；未命中时明确返回，不编造状态。"""
+    if not isinstance(params, dict):
+        return _error("工具参数必须是对象")
+    order_id = params.get("order_id")
+    if order_id is not None and not isinstance(order_id, str):
+        return _error("order_id 必须是字符串")
+    source = context if isinstance(context, Mapping) else {}
+    entities = source.get("entities") if isinstance(source.get("entities"), Mapping) else {}
+    entity_order_id = (entities or {}).get("order_id")
+    if isinstance(entity_order_id, (list, tuple)):
+        entity_order_id = entity_order_id[-1] if entity_order_id else ""
+    resolved = str(order_id or entity_order_id or "").strip()
+    orders_path = Path(__file__).resolve().parents[1] / "data" / "demo_orders.json"
+    try:
+        orders = json.loads(orders_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        orders = []
+    user_id = str(source.get("user_id") or "")
+    matched = next((item for item in orders if item.get("order_id") == resolved and (not user_id or item.get("user_id") == user_id)), None)
+    return {
+        "success": True,
+        "available": matched is not None,
+        "order_id": resolved or None,
+        "source": "demo_order_db",
+        "order": matched,
+        "message": "已查到演示订单。" if matched else ("暂未查到对应订单，请人工继续核对。" if resolved else "缺少订单号，需先澄清。"),
+    }
+
+
+async def lookup_logistics(params: Any, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """从演示订单源读取已知物流字段，不生成虚假物流节点。"""
+    if not isinstance(params, dict):
+        return _error("工具参数必须是对象")
+    tracking_no = params.get("tracking_no")
+    order_id = params.get("order_id")
+    if tracking_no is not None and not isinstance(tracking_no, str):
+        return _error("tracking_no 必须是字符串")
+    if order_id is not None and not isinstance(order_id, str):
+        return _error("order_id 必须是字符串")
+    source = context if isinstance(context, Mapping) else {}
+    entities = source.get("entities") if isinstance(source.get("entities"), Mapping) else {}
+    context_order = entities.get("order_id")
+    context_tracking = entities.get("tracking_no")
+    if isinstance(context_order, (list, tuple)):
+        context_order = context_order[-1] if context_order else ""
+    if isinstance(context_tracking, (list, tuple)):
+        context_tracking = context_tracking[-1] if context_tracking else ""
+    resolved_order = str(order_id or context_order or "").strip()
+    resolved_tracking = str(tracking_no or context_tracking or "").strip()
+    if not resolved_order and not resolved_tracking:
+        return {"success": False, "available": False, "message": "缺少订单号或物流单号，无法查询物流。"}
+    orders_path = Path(__file__).resolve().parents[1] / "data" / "demo_orders.json"
+    try:
+        orders = json.loads(orders_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        orders = []
+    user_id = str(source.get("user_id") or "")
+    matched = next((
+        item for item in orders
+        if (not user_id or item.get("user_id") == user_id)
+        and ((resolved_order and item.get("order_id") == resolved_order)
+             or (resolved_tracking and item.get("tracking_no") == resolved_tracking))
+    ), None)
+    if not matched:
+        return {"success": True, "available": False, "order_id": resolved_order or None,
+                "tracking_no": resolved_tracking or None, "source": "demo_order_db",
+                "message": "演示订单源中没有匹配的物流记录。"}
+    return {
+        "success": True,
+        "available": bool(matched.get("tracking_no") or matched.get("logistics_status")),
+        "order_id": matched.get("order_id"),
+        "tracking_no": matched.get("tracking_no"),
+        "logistics_status": matched.get("logistics_status"),
+        "carrier": matched.get("carrier"),
+        "signed_info": matched.get("signed_info"),
+        "received_by": matched.get("received_by"),
+        "source": "demo_order_db",
+        "message": "已返回演示订单源中已有的物流字段；未提供的轨迹不作推测。",
+    }
+
+
+async def create_ticket_draft(params: Any, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """根据美妆意图注册表生成一张结构化工单草稿，不直接提交正式工单。"""
+    if not isinstance(params, dict):
+        return _error("工具参数必须是对象")
+    intent = str(params.get("intent") or "").strip().lower()
+    contract = BEAUTY_INTENT_TICKET_BY_ID.get(intent)
+    if contract is None or not contract["needs_ticket"]:
+        return _error("该意图不允许创建工单")
+    supplied_fields = params.get("fields") or {}
+    if not isinstance(supplied_fields, dict):
+        return _error("fields 必须是对象")
+    source = context if isinstance(context, Mapping) else {}
+    entities = source.get("entities") if isinstance(source.get("entities"), Mapping) else {}
+    fields = {}
+    for name in contract["ticket_fields"]:
+        value = supplied_fields.get(name)
+        if value is None:
+            value = entities.get(name)
+        if isinstance(value, (list, tuple)):
+            value = value[-1] if value else None
+        if value is not None:
+            fields[name] = value
+    return {
+        "success": True,
+        "status": "draft",
+        "needs_review": True,
+        "intent": intent,
+        "ticket_type": contract["ticket_type"],
+        "risk_level": contract["risk_level"],
+        "fields": fields,
+        "missing_blocking_fields": [name for name in contract["blocking_fields"] if not fields.get(name)],
+    }
+
+
+async def check_refund_status(params: Any, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """读取演示订单库内已知退款字段；未接入真实支付平台时不外推到账状态。"""
+    if not isinstance(params, dict):
+        return _error("工具参数必须是对象")
+    order_id = params.get("order_id")
+    if order_id is not None and not isinstance(order_id, str):
+        return _error("order_id 必须是字符串")
+    source = context if isinstance(context, Mapping) else {}
+    entities = source.get("entities") if isinstance(source.get("entities"), Mapping) else {}
+    context_order = entities.get("order_id")
+    if isinstance(context_order, (list, tuple)):
+        context_order = context_order[-1] if context_order else ""
+    resolved = str(order_id or context_order or "").strip()
+    if not resolved:
+        return {"success": False, "available": False, "message": "缺少订单号，无法核对退款记录。"}
+    orders_path = Path(__file__).resolve().parents[1] / "data" / "demo_orders.json"
+    try:
+        orders = json.loads(orders_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        orders = []
+    user_id = str(source.get("user_id") or "")
+    matched = next((item for item in orders if item.get("order_id") == resolved and (not user_id or item.get("user_id") == user_id)), None)
+    if not matched:
+        return {"success": True, "available": False, "order_id": resolved,
+                "refund_status": None, "source": "demo_order_db",
+                "message": "演示订单库中没有匹配订单的退款记录。"}
+    return {"success": True, "available": matched.get("refund_status") is not None,
+            "order_id": resolved, "refund_status": matched.get("refund_status"),
+            "source": "demo_order_db", "message": "已读取演示订单库退款字段，不代表真实支付平台到账结果。"}
+
+
+async def calculate_price_difference(params: Any, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """计算价保差额，不判断是否符合价保规则。"""
+    if not isinstance(params, dict):
+        return _error("工具参数必须是对象")
+    paid = params.get("paid_amount")
+    current = params.get("current_amount")
+    if not isinstance(paid, Real) or isinstance(paid, bool) or not isinstance(current, Real) or isinstance(current, bool):
+        return _error("paid_amount 和 current_amount 必须是数值")
+    return {"success": True, "price_difference": max(0.0, float(paid) - float(current)), "read_only": True}
+
+
+async def record_risk_event(params: Any, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """生成待写入风险事件的结构，不直接写入外部系统。"""
+    if not isinstance(params, dict):
+        return _error("工具参数必须是对象")
+    if not params.get("risk_type"):
+        return _error("risk_type 必须存在")
+    return {"success": True, "status": "pending_review", "risk_type": str(params["risk_type"]), "level": str(params.get("level") or "P2"), "reason": str(params.get("reason") or "")}
 
 
 _ERROR_CODE_CATALOG: Dict[str, Dict[str, Any]] = {
@@ -444,7 +701,10 @@ INSPECT_REQUEST_CONTEXT_SCHEMA: Dict[str, Any] = {
 SUGGEST_REQUIRED_FIELDS_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "properties": {
-        "intent": {"type": "string", "description": "当前会话主意图。"},
+        "intent": {
+            "type": "string",
+            "description": "兼容字段；系统以请求上下文中的规范意图 ID 为准，不采用自然语言转述。",
+        },
     },
     "required": ["intent"],
     "additionalProperties": False,
@@ -459,10 +719,60 @@ INSPECT_REQUEST_CONTEXT_TOOL = make_tool(
 
 SUGGEST_REQUIRED_FIELDS_TOOL = make_tool(
     "suggest_required_fields",
-    "根据当前意图建议下一轮追问需要补充的字段，不执行任何外部写操作。",
+    "读取当前会话已记录的字段事实与规范业务意图，只返回仍缺少的必需字段；不重新询问已知项，也不执行外部写操作。",
     SUGGEST_REQUIRED_FIELDS_SCHEMA,
     suggest_required_fields,
 )
+
+BEAUTY_LOOKUP_ORDER_TOOL = make_tool(
+    "lookup_order", "读取订单号和当前请求中的订单事实，不伪造订单状态。",
+    {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": [], "additionalProperties": False},
+    lookup_order,
+)
+BEAUTY_LOOKUP_LOGISTICS_TOOL = make_tool(
+    "lookup_logistics", "读取物流单号和已知物流字段，不生成虚假轨迹。",
+    {"type": "object", "properties": {"order_id": {"type": "string"}, "tracking_no": {"type": "string"}}, "required": [], "additionalProperties": False},
+    lookup_logistics,
+)
+BEAUTY_CREATE_TICKET_TOOL = make_tool(
+    "create_ticket_draft", "按美妆工单契约生成待客服审核的工单草稿。",
+    {"type": "object", "properties": {"intent": {"type": "string"}, "fields": {"type": "object"}}, "required": ["intent"], "additionalProperties": False},
+    create_ticket_draft,
+)
+BEAUTY_REFUND_STATUS_TOOL = make_tool(
+    "check_refund_status", "读取已知退款状态，不确认到账或退款结果。",
+    {"type": "object", "properties": {"order_id": {"type": "string"}}, "required": [], "additionalProperties": False},
+    check_refund_status,
+)
+BEAUTY_PRICE_DIFFERENCE_TOOL = make_tool(
+    "calculate_price_difference", "计算价保差额，不判断价保资格。",
+    {"type": "object", "properties": {"paid_amount": {"type": "number"}, "current_amount": {"type": "number"}}, "required": ["paid_amount", "current_amount"], "additionalProperties": False},
+    calculate_price_difference,
+)
+BEAUTY_RISK_EVENT_TOOL = make_tool(
+    "record_risk_event", "生成待人工审核的美妆风险事件记录。",
+    {"type": "object", "properties": {"risk_type": {"type": "string"}, "level": {"type": "string"}, "reason": {"type": "string"}}, "required": ["risk_type"], "additionalProperties": False},
+    record_risk_event,
+)
+
+BEAUTY_TOOLS: Dict[str, AgentToolSpec] = {
+    item.name: item
+    for item in (
+        INSPECT_REQUEST_CONTEXT_TOOL,
+        SUGGEST_REQUIRED_FIELDS_TOOL,
+        BEAUTY_LOOKUP_ORDER_TOOL,
+        BEAUTY_LOOKUP_LOGISTICS_TOOL,
+        BEAUTY_CREATE_TICKET_TOOL,
+        BEAUTY_REFUND_STATUS_TOOL,
+        BEAUTY_PRICE_DIFFERENCE_TOOL,
+        BEAUTY_RISK_EVENT_TOOL,
+    )
+}
+
+
+def beauty_tools() -> Dict[str, AgentToolSpec]:
+    """返回当前美妆业务工具白名单的浅拷贝。"""
+    return dict(BEAUTY_TOOLS)
 
 GENERAL_TOOLS: Dict[str, AgentToolSpec] = {
     INSPECT_REQUEST_CONTEXT_TOOL.name: INSPECT_REQUEST_CONTEXT_TOOL,

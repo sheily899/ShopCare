@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
-
 import intent.intent_recognizer as recognizer
 from intent.intent_recognizer import (
     EmbeddingIntentResult,
@@ -20,7 +17,8 @@ def _run(coroutine):
     return asyncio.run(coroutine)
 
 
-def test_local_embedding_fallback_is_fixed_256_dimension_and_bounded() -> None:
+def test_local_embedding_fallback_is_fixed_256_dimension_and_bounded(monkeypatch) -> None:
+    monkeypatch.setattr(recognizer, "_get_local_embedding_function", lambda: None)
     vector = _hash_ngram_vector("退款 refund")
     result = _run(_recognize_with_embedding("我要退款"))
 
@@ -28,41 +26,13 @@ def test_local_embedding_fallback_is_fixed_256_dimension_and_bounded() -> None:
     assert result.local_fallback is True
     assert result.success is True
     assert 0.0 <= result.score <= 1.0
-    assert result.intent is IntentCategory.REFUND
-
-
-def test_configured_remote_embedding_is_async_and_skips_local_fallback(monkeypatch) -> None:
-    monkeypatch.setenv("EMBEDDING_API_URL", "https://embedding.test/v1/embeddings")
-    texts = [
-        text
-        for templates in EMBEDDING_TEMPLATES.values()
-        for text in templates
-    ] + ["我要退款"]
-    remote_client = SimpleNamespace(post=AsyncMock())
-    remote_client.post.return_value = {
-        "data": [
-            {"embedding": _hash_ngram_vector(text)}
-            for text in texts
-        ]
-    }
-
-    result = _run(
-        _recognize_with_embedding("我要退款", remote_client=remote_client)
-    )
-
-    assert result.local_fallback is False
-    assert result.success is True
-    assert result.intent is IntentCategory.REFUND
-    remote_client.post.assert_awaited_once()
-    request_payload = remote_client.post.await_args.kwargs["json"]
-    assert request_payload["model"] == "voyage-3-lite"
-    assert len(request_payload["input"]) == len(texts)
+    assert result.intent is IntentCategory.RETURN_REFUND
 
 
 def test_intent_result_keeps_source_and_final_diagnostics(monkeypatch) -> None:
     async def fake_llm(message, history=None):
         return LLMIntentResult(
-            intent=IntentCategory.TECHNICAL,
+            intent=IntentCategory.ORDER_STATUS_BEAUTY,
             confidence=0.77,
             reasoning="包含技术问题",
             success=True,
@@ -70,7 +40,7 @@ def test_intent_result_keeps_source_and_final_diagnostics(monkeypatch) -> None:
 
     async def fake_embedding(message):
         return EmbeddingIntentResult(
-            intent=IntentCategory.TECHNICAL,
+            intent=IntentCategory.ORDER_STATUS_BEAUTY,
             score=0.66,
             success=True,
             local_fallback=True,
@@ -82,28 +52,28 @@ def test_intent_result_keeps_source_and_final_diagnostics(monkeypatch) -> None:
         recognizer,
         "_pattern_recognize",
         lambda message: {
-            "intent": IntentCategory.TECHNICAL,
+            "intent": IntentCategory.ORDER_STATUS_BEAUTY,
             "confidence": 0.5,
-            "scores": {IntentCategory.TECHNICAL.value: 0.5},
+            "scores": {IntentCategory.ORDER_STATUS_BEAUTY.value: 0.5},
             "specific_intent": IntentCategory.OTHER,
             "specific_score": 0.0,
         },
     )
 
-    result = _run(recognize_intent("页面打不开"))
+    result = _run(recognize_intent("我的订单到哪里了"))
 
     assert result.source_intents == {
-        "llm": "technical",
-        "embedding": "technical",
-        "pattern": "technical",
+        "llm": "order_status",
+        "embedding": "order_status",
+        "pattern": "order_status",
     }
     assert result.source_scores == {
         "llm": 0.77,
         "embedding": 0.66,
         "pattern": 0.5,
     }
-    assert result.intent is IntentCategory.TECHNICAL
-    assert result.intent_diagnostics["final_intent"] == "technical"
+    assert result.intent is IntentCategory.ORDER_STATUS_BEAUTY
+    assert result.intent_diagnostics["final_intent"] == "order_status"
     assert result.intent_diagnostics["final_confidence"] == result.confidence
     assert result.intent_diagnostics["embedding_local_fallback"] is True
     assert result.latency_ms >= 0.0

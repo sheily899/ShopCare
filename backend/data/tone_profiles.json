@@ -1,0 +1,7 @@
+{
+  "calm": {"max_follow_up": 2},
+  "anxious": {"max_follow_up": 2},
+  "upset": {"max_follow_up": 1},
+  "angry": {"max_follow_up": 0},
+  "threatening": {"max_follow_up": 0}
+}

@@ -1,6 +1,7 @@
 """评测运行器的 fake HTTP 离线测试。"""
 
 import asyncio
+import json
 
 from evaluation.run_evaluation import EvaluationRunner, write_reports
 
@@ -40,6 +41,19 @@ class FakeClient:
         })
 
 
+class FlakyHealthClient(FakeClient):
+    def __init__(self):
+        super().__init__()
+        self.health_attempts = 0
+
+    async def get(self, url):
+        if url.endswith("/health") and self.health_attempts == 0:
+            self.health_attempts += 1
+            self.calls.append(("GET", url))
+            return FakeResponse(502, {"detail": "upstream starting"})
+        return await super().get(url)
+
+
 def _case():
     return {
         "case_id": "case-1",
@@ -61,6 +75,14 @@ def test_runner_preflights_and_sends_one_chat_without_retry():
     report = asyncio.run(runner.run([_case()]))
     assert report["summary"]["total_cases"] == 1
     assert [call[0] for call in client.calls] == ["GET", "POST", "GET"]
+
+
+def test_runner_retries_transient_health_gateway_error():
+    client = FlakyHealthClient()
+    runner = EvaluationRunner("http://fake", "evaluation_benchmark", client, preflight_retries=1)
+    report = asyncio.run(runner.run([_case()]))
+    assert report["summary"]["total_cases"] == 1
+    assert [call[0] for call in client.calls] == ["GET", "GET", "POST", "GET"]
 
 
 def test_runner_separates_network_failure():
@@ -89,3 +111,5 @@ def test_report_writer_creates_three_files(tmp_path):
     assert (output / "summary.json").exists()
     assert (output / "cases.jsonl").exists()
     assert (output / "report.md").exists()
+    first_case = json.loads((output / "cases.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert first_case["evaluation"]["e2e_contract_pass"] is True

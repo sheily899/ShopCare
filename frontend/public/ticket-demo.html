@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ShopCare 工单 Demo</title>
+  <style>
+    :root{font-family:Inter,"Microsoft YaHei",sans-serif;color:#3d2d36;background:#f8f6f4}
+    *{box-sizing:border-box} body{margin:0;padding:32px} .page{max-width:920px;margin:auto}
+    .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px}.top h1{font-size:24px;margin:0}.status{padding:6px 12px;border-radius:999px;background:#fff0c9;color:#8b641d;font-size:13px}
+    .card{background:#fff;border:1px solid #eadfe1;border-radius:16px;padding:24px;margin-bottom:16px;box-shadow:0 4px 16px #5530470b}
+    .card h2{font-size:17px;margin:0 0 18px;color:#6d304f}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 24px}.field small{display:block;color:#9b808b;font-size:12px;margin-bottom:4px}.field strong{font-size:15px;font-weight:600}
+    .pill{display:inline-block;padding:5px 10px;border-radius:999px;background:#f5e7ed;color:#a5456d;margin:3px 5px 3px 0;font-size:13px}.pill.green{background:#e6f2eb;color:#37745b}.pill.yellow{background:#fff1ce;color:#93671b}.pill.red{background:#f9e1e5;color:#a04454}
+    .notice{background:#fff3d6;border:1px solid #f1d99d;border-radius:10px;padding:13px 15px;color:#79581b;line-height:1.7}.steps{margin:0;padding-left:22px;line-height:2}.footer{font-size:12px;color:#9b808b}
+    @media(max-width:640px){body{padding:16px}.grid{grid-template-columns:1fr}.card{padding:18px}}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="top"><h1>工单 T-7F3A4821 · 不良反应登记</h1><span class="status">待审核</span></header>
+    <section class="card"><h2>基础信息</h2><div class="grid">
+      <div class="field"><small>工单号</small><strong>T-7F3A4821</strong></div>
+      <div class="field"><small>会话 ID</small><strong>conv-demo-4821</strong></div>
+      <div class="field"><small>买家</small><strong>consumer-demo</strong></div>
+      <div class="field"><small>创建时间</small><strong>2026-10-17 18:42</strong></div>
+    </div></section>
+    <section class="card"><h2>消费者与订单</h2><div class="grid">
+      <div class="field"><small>订单号</small><strong>SC-DEMO-4821</strong></div>
+      <div class="field"><small>商品</small><strong>轻透粉底液</strong></div>
+      <div class="field"><small>规格</small><strong>N02 · 30ml</strong></div>
+      <div class="field"><small>订单状态</small><span class="pill green">已签收</span></div>
+    </div></section>
+    <section class="card"><h2>问题与风险</h2><div><span class="pill red">整脸发红</span><span class="pill red">发痒</span><span class="pill red">肿胀加重</span><span class="pill green">已停用</span></div><p class="notice">请先暂停使用相关产品并保留产品、外包装和批次信息；如症状继续加重或出现呼吸不适，请尽快就医。</p></section>
+    <section class="card"><h2>部门待办</h2><ol class="steps"><li><b>质量</b>：核对不良反应风险与商品批次</li><li><b>财务</b>：核对退货资格与退款处理</li></ol></section>
+    <section class="card"><h2>待补信息</h2><span class="pill yellow">不适部位</span><span class="pill yellow">是否就医</span><p class="footer">订单号、商品、症状和停用状态已从消费者原话中记录。</p></section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,28 @@
+{
+  "version": "1.0",
+  "slots": [
+    {"slot_id": "stopped_use", "display_name": "使用状态", "type": "enum", "options": [{"label": "已停用", "value": "stopped"}, {"label": "还在用", "value": "using"}], "extractor": "rule_or_llm", "question_key": "stopped_use_question"},
+    {"slot_id": "medical_visit", "display_name": "就医情况", "type": "enum", "options": [{"label": "已就医", "value": "visited"}, {"label": "没就医", "value": "not_visited"}], "extractor": "rule_or_llm", "question_key": "medical_visit_question"},
+    {"slot_id": "skin_type", "display_name": "肤质", "type": "enum", "options": [{"label": "干性", "value": "dry"}, {"label": "油性", "value": "oily"}, {"label": "混合", "value": "combination"}, {"label": "敏感", "value": "sensitive"}], "extractor": "rule_or_llm", "question_key": "skin_type_question"},
+    {"slot_id": "opened_or_used", "display_name": "正装拆封/使用状态", "type": "enum", "question_text": "正装目前是未拆封、拆封未用，还是已经使用？", "options": [{"label": "未拆封", "value": "unopened"}, {"label": "已拆封未使用", "value": "opened_unused"}, {"label": "已使用", "value": "used"}, {"label": "已拆封，使用情况不确定", "value": "opened_usage_unknown"}], "extractor": "rule_or_llm", "question_key": "opened_or_used_question"},
+    {"slot_id": "order_id", "display_name": "订单号", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "order_id_question"},
+    {"slot_id": "return_reason", "display_name": "退款原因", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "return_reason_question"},
+    {"slot_id": "symptom", "display_name": "症状", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "symptom_question"},
+    {"slot_id": "symptom_area", "display_name": "不适部位", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "symptom_area_question"},
+    {"slot_id": "onset_time", "display_name": "出现时间", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "onset_time_question"},
+    {"slot_id": "age", "display_name": "年龄段", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "age_question"},
+    {"slot_id": "missing_item", "display_name": "缺少商品", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "missing_item_question"},
+    {"slot_id": "shade_received", "display_name": "收到的色号", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "shade_received_question"},
+    {"slot_id": "damaged_area", "display_name": "破损部位", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "damaged_area_question"},
+    {"slot_id": "signed_info", "display_name": "签收信息", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "signed_info_question"},
+    {"slot_id": "return_scope", "display_name": "退款范围", "type": "enum", "options": [{"label": "整单退款", "value": "whole_order"}, {"label": "只退正装", "value": "main_item_only"}, {"label": "正装和赠品分开处理", "value": "separate_items"}, {"label": "只退赠品/小样", "value": "gift_only"}], "extractor": "rule_or_llm", "question_key": "return_scope_question"},
+    {"slot_id": "gift_opened_or_used", "display_name": "赠品/小样拆封或使用状态", "type": "enum", "options": [{"label": "未拆封", "value": "unopened"}, {"label": "已拆封未使用", "value": "opened_unused"}, {"label": "已使用", "value": "used"}, {"label": "已拆封，使用情况不确定", "value": "opened_usage_unknown"}], "extractor": "rule_or_llm", "question_key": "gift_opened_or_used_question"},
+    {"slot_id": "intercept_or_change", "display_name": "拦截/改址需求", "type": "enum", "question_text": "您需要拦截包裹、修改地址，还是两项都需要？", "options": [{"label": "拦截包裹", "value": "intercept"}, {"label": "修改地址", "value": "change_address"}, {"label": "拦截并改址", "value": "both"}], "extractor": "rule_or_llm", "question_key": "intercept_or_change_question"},
+    {"slot_id": "wrong_item", "display_name": "收到的错发商品", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "wrong_item_question"},
+    {"slot_id": "shade", "display_name": "错发色号", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "shade_question"},
+    {"slot_id": "quantity", "display_name": "涉及数量", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "quantity_question"},
+    {"slot_id": "refund_amount", "display_name": "退款金额", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "refund_amount_question"},
+    {"slot_id": "price_difference", "display_name": "价差金额", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "price_difference_question"},
+    {"slot_id": "tracking_no", "display_name": "物流单号", "type": "text", "options": [], "extractor": "rule_or_llm", "question_key": "tracking_no_question"}
+  ]
+}

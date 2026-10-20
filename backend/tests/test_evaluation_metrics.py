@@ -110,6 +110,28 @@ def test_cost_missing_usage_is_unavailable_not_zero():
     assert summarize([item], [_result()])["cost"]["status"] == "unavailable"
 
 
+def test_cost_summary_breaks_down_stage_usage_without_changing_total_cost():
+    item = evaluate_case(_case(), _result())
+    result = _result()
+    result["usage"] = {
+        "input_tokens": 30,
+        "output_tokens": 10,
+        "total_tokens": 40,
+    }
+    result["response"]["usage_by_stage"] = {
+        "intent": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12},
+        "agent_billing": {"input_tokens": 20, "output_tokens": 8, "total_tokens": 28},
+    }
+
+    summary = summarize([item], [result])
+
+    assert summary["cost"]["total_tokens"] == 40.0
+    assert summary["cost"]["by_stage"] == {
+        "intent": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "requests": 1},
+        "agent_billing": {"input_tokens": 20, "output_tokens": 8, "total_tokens": 28, "requests": 1},
+    }
+
+
 def test_summary_separates_intent_route_citation_and_latency_percentiles():
     item = evaluate_case(_case(), _result())
     summary = summarize([item], [_result()])
@@ -125,3 +147,26 @@ def test_summary_separates_intent_route_citation_and_latency_percentiles():
     assert summary["retrieval_f1"] == 1.0
     assert summary["retrieval_mrr"] == 1.0
     assert summary["client_round_trip_ms"]["p99"] == 120.0
+
+
+def test_e2e_contract_accuracy_requires_all_business_gates():
+    """端到端契约通过必须同时满足主链路、知识和安全门槛。"""
+
+    passing = evaluate_case(_case(), _result())
+    assert passing.e2e_contract_pass is True
+    assert passing.e2e_failure_reasons == ()
+
+    missing_retrieval = _result()
+    missing_retrieval["trace"] = {"trace": {"tool_traces": []}}
+    failed = evaluate_case(_case(), missing_retrieval)
+    assert failed.e2e_contract_pass is False
+    assert "knowledge_retrieval" in failed.e2e_failure_reasons
+
+    summary = summarize(
+        [passing, failed],
+        [_result(), missing_retrieval],
+    )
+    assert summary["e2e_contract_accuracy"] == 0.5
+    assert summary["e2e_contract_passed"] == 1
+    assert summary["e2e_contract_denominator"] == 2
+    assert summary["e2e_semantic_accuracy"]["status"] == "unavailable"

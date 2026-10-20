@@ -49,16 +49,32 @@ def test_eval_collection_isolated_from_product_collection():
 def test_upsert_preserves_stable_ids_and_does_not_reslice():
     chunks = load_corpus(ROOT / "evaluation/datasets/shopcare_evaluation_corpus.json")[:1]
     collection = FakeCollection()
-    assert upsert_stable_chunks(collection, chunks) == 1
+    assert upsert_stable_chunks(
+        collection,
+        chunks,
+        lambda texts: [[0.1, 0.2, 0.3] for _ in texts],
+    ) == 1
     assert collection.calls[0]["ids"] == [chunks[0]["id"]]
     assert collection.calls[0]["documents"] == [chunks[0]["content"]]
     assert collection.calls[0]["metadatas"][0]["source_chunk_id"] == chunks[0]["source_chunk_id"]
+    assert collection.calls[0]["embeddings"] == [[0.1, 0.2, 0.3]]
+
+
+def test_stable_writer_requires_explicit_embedding_function():
+    chunks = load_corpus(ROOT / "evaluation/datasets/shopcare_evaluation_corpus.json")[:1]
+    try:
+        upsert_stable_chunks(FakeCollection(), chunks, None)
+    except TypeError as exc:
+        assert "显式本地 embedding" in str(exc)
+    else:
+        raise AssertionError("评测写入不可依赖 Chroma 默认 embedding")
 
 
 def test_knowledge_base_stable_writer_keeps_original_chunk_identity():
     collection = FakeCollection()
     kb = object.__new__(KnowledgeBase)
     kb._collection = collection
+    kb._embedding_function = lambda texts: [[0.1, 0.2, 0.3] for _ in texts]
     chunks = load_corpus(ROOT / "evaluation/datasets/shopcare_evaluation_corpus.json")[:1]
     assert kb.add_stable_chunks(chunks) == 1
     assert collection.calls[0]["ids"] == [chunks[0]["id"]]

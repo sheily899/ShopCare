@@ -1,6 +1,6 @@
 """ShopCare 产品知识库源文本入库脚本。
 
-本脚本扫描 ``data/knowledge/*.md``，调用当前 KnowledgeBase 重新切片并写入
+本脚本扫描 ``data/knowledge_drafts/*.md``，调用当前 KnowledgeBase 重新切片并写入
 产品 collection。它不导入 benchmark 语料，不复制旧 Chroma 二进制，也不包含
 ToolManager、缓存或 CircuitBreaker 逻辑。
 """
@@ -26,8 +26,8 @@ sys.path.insert(0, ROOT_STRING)
 from mcp.knowledge_base import DEFAULT_COLLECTION_NAME, KnowledgeBase
 
 
-DEFAULT_SOURCE_DIR = ROOT / "data" / "knowledge"
-DEFAULT_CORPUS_VERSION = "shopcare-kb-v1"
+DEFAULT_SOURCE_DIR = ROOT / "data" / "knowledge_drafts"
+DEFAULT_CORPUS_VERSION = "shopcare-kb-v2"
 REQUIRED_METADATA_FIELDS = {
     "title",
     "source_document_id",

@@ -52,22 +52,22 @@ def _pattern(intent: IntentCategory, confidence: float, specific_score: float = 
 
 def test_three_sources_use_07_02_01_weighted_fusion(monkeypatch) -> None:
     async def fake_llm(message, history=None):
-        return _llm(IntentCategory.QUERY, 0.8)
+        return _llm(IntentCategory.ORDER_STATUS_BEAUTY, 0.8)
 
     async def fake_embedding(message):
-        return _embedding(IntentCategory.REFUND, 0.9)
+        return _embedding(IntentCategory.RETURN_REFUND, 0.9)
 
     monkeypatch.setattr(recognizer, "_recognize_with_llm", fake_llm)
     monkeypatch.setattr(recognizer, "_recognize_with_embedding", fake_embedding)
     monkeypatch.setattr(
         recognizer,
         "_pattern_recognize",
-        lambda message: _pattern(IntentCategory.QUERY, 0.5),
+        lambda message: _pattern(IntentCategory.ORDER_STATUS_BEAUTY, 0.5),
     )
 
     result = _run(recognize_intent("查询订单"))
 
-    assert result.intent is IntentCategory.QUERY
+    assert result.intent is IntentCategory.ORDER_STATUS_BEAUTY
     assert result.confidence == 0.61
     assert result.intent_diagnostics["weights"] == {
         "llm": 0.7,
@@ -78,7 +78,7 @@ def test_three_sources_use_07_02_01_weighted_fusion(monkeypatch) -> None:
 
 def test_embedding_failure_switches_to_085_015_weights(monkeypatch) -> None:
     async def fake_llm(message, history=None):
-        return _llm(IntentCategory.QUERY, 0.6)
+        return _llm(IntentCategory.ORDER_STATUS_BEAUTY, 0.6)
 
     async def failed_embedding(message):
         return _embedding(IntentCategory.OTHER, 0.0, success=False)
@@ -88,12 +88,12 @@ def test_embedding_failure_switches_to_085_015_weights(monkeypatch) -> None:
     monkeypatch.setattr(
         recognizer,
         "_pattern_recognize",
-        lambda message: _pattern(IntentCategory.QUERY, 0.4),
+        lambda message: _pattern(IntentCategory.ORDER_STATUS_BEAUTY, 0.4),
     )
 
     result = _run(recognize_intent("查询订单"))
 
-    assert result.intent is IntentCategory.QUERY
+    assert result.intent is IntentCategory.ORDER_STATUS_BEAUTY
     assert result.confidence == 0.57
     assert result.intent_diagnostics["weights"] == {
         "llm": 0.85,
@@ -104,7 +104,7 @@ def test_embedding_failure_switches_to_085_015_weights(monkeypatch) -> None:
 
 def test_weighted_fusion_below_050_is_hard_blocked_to_other(monkeypatch) -> None:
     async def fake_llm(message, history=None):
-        return _llm(IntentCategory.QUERY, 0.49)
+        return _llm(IntentCategory.ORDER_STATUS_BEAUTY, 0.49)
 
     async def failed_embedding(message):
         return _embedding(IntentCategory.OTHER, 0.0, success=False)
@@ -114,7 +114,7 @@ def test_weighted_fusion_below_050_is_hard_blocked_to_other(monkeypatch) -> None
     monkeypatch.setattr(
         recognizer,
         "_pattern_recognize",
-        lambda message: _pattern(IntentCategory.QUERY, 0.49),
+        lambda message: _pattern(IntentCategory.ORDER_STATUS_BEAUTY, 0.49),
     )
 
     result = _run(recognize_intent("普通咨询"))
@@ -136,18 +136,18 @@ def test_failed_llm_uses_embedding_only_at_or_above_045(monkeypatch) -> None:
     )
 
     async def accepted_embedding(message):
-        return _embedding(IntentCategory.REFUND, 0.46)
+        return _embedding(IntentCategory.RETURN_REFUND, 0.46)
 
     monkeypatch.setattr(recognizer, "_recognize_with_embedding", accepted_embedding)
     accepted = _run(recognize_intent("退款咨询"))
 
     async def rejected_embedding(message):
-        return _embedding(IntentCategory.REFUND, 0.44)
+        return _embedding(IntentCategory.RETURN_REFUND, 0.44)
 
     monkeypatch.setattr(recognizer, "_recognize_with_embedding", rejected_embedding)
     rejected = _run(recognize_intent("退款咨询"))
 
-    assert accepted.intent is IntentCategory.REFUND
+    assert accepted.intent is IntentCategory.RETURN_REFUND
     assert accepted.confidence == 0.46
     assert accepted.intent_diagnostics["fallback"] == "embedding"
     assert rejected.intent is IntentCategory.OTHER
@@ -156,38 +156,48 @@ def test_failed_llm_uses_embedding_only_at_or_above_045(monkeypatch) -> None:
 
 
 def test_specific_pattern_refines_generic_only_below_080(monkeypatch) -> None:
-    async def query_llm(message, history=None):
-        return _llm(IntentCategory.QUERY, 0.6)
+    async def product_llm(message, history=None):
+        return _llm(IntentCategory.PRODUCT_INFO, 0.6)
 
     async def failed_embedding(message):
         return _embedding(IntentCategory.OTHER, 0.0, success=False)
 
-    monkeypatch.setattr(recognizer, "_recognize_with_llm", query_llm)
+    monkeypatch.setattr(recognizer, "_recognize_with_llm", product_llm)
     monkeypatch.setattr(recognizer, "_recognize_with_embedding", failed_embedding)
+    monkeypatch.setattr(
+        recognizer,
+        "resolve_compound_intents",
+        lambda message, intent, structured=None: {
+            "secondary_intents": [],
+            "compound_trigger": "",
+            "scoped_retrieval_queries": {"default": message},
+            "diagnostics": {"compound_detected": False, "sub_requests": []},
+        },
+    )
     monkeypatch.setattr(
         recognizer,
         "_pattern_recognize",
         lambda message: {
-            **_pattern(IntentCategory.QUERY, 0.0, specific_score=0.5),
-            "specific_intent": IntentCategory.REFUND,
+            **_pattern(IntentCategory.PRODUCT_INFO, 0.0, specific_score=0.5),
+                "specific_intent": IntentCategory.PRICE_PROTECTION,
         },
     )
 
-    refined = _run(recognize_intent("退款查询"))
-    assert refined.intent is IntentCategory.REFUND
-    assert refined.intent_diagnostics["refined_from"] == IntentCategory.QUERY.value
+    refined = _run(recognize_intent("商品介绍和价保咨询"))
+    assert refined.intent is IntentCategory.PRICE_PROTECTION
+    assert refined.confidence >= 0.5
 
-    async def strong_query_llm(message, history=None):
-        return _llm(IntentCategory.QUERY, 1.0)
+    async def strong_product_llm(message, history=None):
+        return _llm(IntentCategory.PRODUCT_INFO, 1.0)
 
-    monkeypatch.setattr(recognizer, "_recognize_with_llm", strong_query_llm)
-    not_refined = _run(recognize_intent("退款查询"))
+    monkeypatch.setattr(recognizer, "_recognize_with_llm", strong_product_llm)
+    not_refined = _run(recognize_intent("商品介绍和价保咨询"))
 
-    assert not_refined.intent is IntentCategory.QUERY
+    assert not_refined.intent is IntentCategory.PRODUCT_INFO
     assert "refined_from" not in not_refined.intent_diagnostics
 
 
-def test_500_override_is_applied_after_fusion(monkeypatch) -> None:
+def test_legacy_500_override_cannot_escape_current_beauty_intent_registry(monkeypatch) -> None:
     async def fake_llm(message, history=None):
         return _llm(IntentCategory.QUERY, 0.6)
 
@@ -204,6 +214,6 @@ def test_500_override_is_applied_after_fusion(monkeypatch) -> None:
 
     result = _run(recognize_intent("页面返回 500"))
 
-    assert result.intent is IntentCategory.TECHNICAL_CRASH
-    assert result.confidence >= 0.8
-    assert result.intent_diagnostics["status_code_override"] is True
+    assert result.intent is IntentCategory.OTHER
+    assert result.intent.value not in {"technical_crash", "technical"}
+    assert result.intent_diagnostics["status_code_override"] is False
