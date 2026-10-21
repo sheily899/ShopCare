@@ -35,6 +35,21 @@ HISTORY_TOP_K = 5
 SUMMARY_MAX_CHARS = 800
 EPISODIC_FULL_TEXT_MAX_CHARS = 500
 PROFILE_DOC_PREFIX = "profile:"
+_MEMORY_EMBEDDING_FUNCTION: Any = None
+EPISODIC_COLLECTION_NAME = "episodic_bge_small_zh"
+PROFILE_COLLECTION_NAME = "user_profile_bge_small_zh"
+
+
+def _local_memory_embedding(texts: List[str]) -> List[List[float]]:
+    """使用项目配置的本地 embedding，禁止 Chroma 服务端隐式下载模型。"""
+    global _MEMORY_EMBEDDING_FUNCTION
+    from mcp.knowledge_base import build_embedding_function
+
+    model_name = os.getenv("CUSTOMEROPS_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+    if _MEMORY_EMBEDDING_FUNCTION is None:
+        _MEMORY_EMBEDDING_FUNCTION = build_embedding_function(model_name)
+    vectors = _MEMORY_EMBEDDING_FUNCTION(texts)
+    return [[float(value) for value in vector] for vector in vectors]
 
 
 class MsgRole(str, Enum):
@@ -615,7 +630,10 @@ class MemoryManager:
         if self._episodic is not None:
             return self._episodic
         if self._chroma_client is not None:
-            self._episodic = self._chroma_client.get_or_create_collection("episodic")
+            self._episodic = self._chroma_client.get_or_create_collection(
+                name=EPISODIC_COLLECTION_NAME,
+                embedding_function=None,
+            )
             return self._episodic
         try:
             import chromadb
@@ -632,7 +650,10 @@ class MemoryManager:
                 client = chromadb.PersistentClient(
                     path=os.getenv("CHROMA_PERSIST_DIRECTORY", ".data/chroma")
                 )
-            self._episodic = client.get_or_create_collection("episodic")
+            self._episodic = client.get_or_create_collection(
+                name=EPISODIC_COLLECTION_NAME,
+                embedding_function=None,
+            )
         except Exception as exc:
             logger.warning("Chroma 情景记忆集合不可用: %s", exc)
             return None
@@ -655,7 +676,10 @@ class MemoryManager:
         if self._profile is not None:
             return self._profile
         if self._chroma_client is not None:
-            self._profile = self._chroma_client.get_or_create_collection("user_profile")
+            self._profile = self._chroma_client.get_or_create_collection(
+                name=PROFILE_COLLECTION_NAME,
+                embedding_function=None,
+            )
             return self._profile
         try:
             import chromadb
@@ -672,7 +696,10 @@ class MemoryManager:
                 client = chromadb.PersistentClient(
                     path=os.getenv("CHROMA_PERSIST_DIRECTORY", ".data/chroma")
                 )
-            self._profile = client.get_or_create_collection("user_profile")
+            self._profile = client.get_or_create_collection(
+                name=PROFILE_COLLECTION_NAME,
+                embedding_function=None,
+            )
         except Exception as exc:
             logger.warning("Chroma 用户画像集合不可用: %s", exc)
             return None
@@ -789,6 +816,11 @@ class MemoryManager:
                 "ids": [document_id],
                 "documents": [document],
                 "metadatas": [metadata],
+                # Collection embedding provider is deliberately disabled; all writes
+                # must carry vectors from the configured local model explicitly.
+                "embeddings": await asyncio.to_thread(
+                    _local_memory_embedding, [document]
+                ),
             }
             upsert = getattr(collection, "upsert", None)
             if upsert is not None:
@@ -865,6 +897,7 @@ class MemoryManager:
         await asyncio.to_thread(
             collection.add,
             ids=[doc_id],
+            embeddings=await asyncio.to_thread(_local_memory_embedding, [str(summary)]),
             documents=[str(summary)],
             metadatas=[metadata],
         )
@@ -919,7 +952,11 @@ class MemoryManager:
             Chroma 原始查询结果。
         """
         kwargs: Dict[str, Any] = {"where": where, "n_results": limit}
-        kwargs["query_texts"] = [query or ""]
+        # HTTP Chroma 不会使用客户端 embedding_function；传 query_texts 会触发
+        # 服务端默认 all-MiniLM-L6-v2 下载，因此始终显式传本地向量。
+        kwargs["query_embeddings"] = await asyncio.to_thread(
+            _local_memory_embedding, [query or ""]
+        )
         try:
             return await asyncio.to_thread(collection.query, **kwargs)
         except Exception:

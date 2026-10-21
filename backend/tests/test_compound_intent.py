@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 import intent.intent_recognizer as recognizer
 from intent.intent_recognizer import (
     EmbeddingIntentResult,
@@ -12,43 +14,31 @@ from intent.intent_recognizer import (
     recognize_intent,
     split_compound_clauses,
 )
+from agents.agent_orchestrator import AgentType, Request, _request_for_agent
 
 
 def _run(coroutine):
     return asyncio.run(coroutine)
 
 
-def _llm(intent: IntentCategory, confidence: float = 0.95):
-    return LLMIntentResult(
-        intent=intent,
-        confidence=confidence,
-        reasoning="compound test",
-        success=True,
-    )
-
-
-def _embedding(intent: IntentCategory, score: float = 0.9):
-    return EmbeddingIntentResult(intent=intent, score=score, success=True)
-
-
-def _pattern(intent: IntentCategory, confidence: float = 0.8):
+def _pattern(intent: IntentCategory, confidence: float = 0.0):
     return {
         "intent": intent,
         "confidence": confidence,
         "candidates": [intent],
         "scores": {intent.value: confidence},
         "hits": {},
-        "specific_intent": intent,
-        "specific_score": confidence,
+        "specific_intent": IntentCategory.OTHER,
+        "specific_score": 0.0,
     }
 
 
-def test_long_single_intent_without_split_signal_does_not_enter_compound_branch() -> None:
-    message = "电脑开不了机页面也打不开但我想先了解一下如何排查"
+def test_single_beauty_request_does_not_enter_compound_branch() -> None:
+    message = "这款精华适合敏感肌使用吗？"
 
     clauses = split_compound_clauses(message)
     secondary, trigger, diagnostics = detect_compound_intents(
-        message, IntentCategory.TECHNICAL
+        message, IntentCategory.INGREDIENT_FIT
     )
 
     assert len(clauses) == 1
@@ -57,204 +47,203 @@ def test_long_single_intent_without_split_signal_does_not_enter_compound_branch(
     assert diagnostics["compound_detected"] is False
 
 
-def test_cross_domain_technical_and_billing_request_keeps_billing_secondary() -> None:
-    message = "电脑开不了机，修不好怎么退货？"
+def test_order_and_refund_request_split_into_scoped_subrequests() -> None:
+    message = "订单里漏发了两个小样，同时我要申请退款"
 
     secondary, trigger, diagnostics = detect_compound_intents(
-        message, IntentCategory.TECHNICAL
+        message, IntentCategory.MISSING_ITEM
     )
 
-    assert secondary == [IntentCategory.REFUND]
-    assert trigger == "，"
-    assert diagnostics["clauses"] == ["电脑开不了机", "修不好怎么退货"]
-    assert diagnostics["clause_intents"] == [
-        IntentCategory.TECHNICAL.value,
-        IntentCategory.REFUND.value,
-    ]
-    scoped = build_scoped_retrieval_queries(
+    assert secondary == [IntentCategory.RETURN_REFUND]
+    assert trigger == "同时"
+    assert diagnostics["clause_intents"] == ["missing_item", "return_refund"]
+    assert diagnostics["sub_requests"][0]["domain"] == "order"
+    assert diagnostics["sub_requests"][1]["domain"] == "after_sales"
+    assert build_scoped_retrieval_queries(
         message, secondary, diagnostics["clause_matches"]
-    )
-    assert scoped["billing"] == "修不好怎么退货"
-    assert scoped["technical"] == "电脑开不了机"
+    ) == {
+        "order": "订单里漏发了两个小样",
+        "after_sales": "我要申请退款",
+    }
 
 
-def test_payment_processing_clause_is_classified_as_billing_subrequest() -> None:
-    message = "页面打不开，同时我还想确认一笔支付是否处于处理中，请分别处理这两个问题。"
+@pytest.mark.parametrize(
+    ("message", "primary", "expected_secondary", "has_refund_clause"),
+    [
+        ("我不要退款，同时想查物流进度", IntentCategory.ORDER_STATUS_BEAUTY, [], False),
+        (
+            "我要退款，同时物流一直没更新",
+            IntentCategory.RETURN_REFUND,
+            [IntentCategory.LOGISTICS_STALLED],
+            True,
+        ),
+        ("不是退款，而是物流查询", IntentCategory.ORDER_STATUS_BEAUTY, [], False),
+        ("我不想退货，但物流没更新", IntentCategory.ORDER_STATUS_BEAUTY, [], False),
+    ],
+)
+def test_compound_intents_keep_affirmative_clauses_and_drop_negated_ones(
+    message: str,
+    primary: IntentCategory,
+    expected_secondary: list[IntentCategory],
+    has_refund_clause: bool,
+) -> None:
+    secondary, _, diagnostics = detect_compound_intents(message, primary)
 
-    secondary, _, diagnostics = detect_compound_intents(
-        message, IntentCategory.TECHNICAL
-    )
-
-    assert secondary == [IntentCategory.PAYMENT_ISSUE]
-    assert diagnostics["sub_requests"][0]["domain"] == "technical"
-    assert diagnostics["sub_requests"][1]["domain"] == "billing"
+    assert secondary == expected_secondary
+    assert ("return_refund" in diagnostics["clause_intents"]) is has_refund_clause
 
 
-def test_compound_subrequests_create_one_scoped_query_per_business_domain() -> None:
-    message = "页面返回500，而且支付结果也没确认，请分别保留两边的待确认项。"
-    secondary, _, diagnostics = detect_compound_intents(
-        message, IntentCategory.TECHNICAL
-    )
+def test_same_domain_compound_intents_do_not_create_another_agent() -> None:
+    message = "这款精华有哪些成分，而且敏感肌能不能用？"
 
-    assert secondary == [IntentCategory.PAYMENT_ISSUE]
-    queries = build_scoped_retrieval_queries(
-        message, secondary, diagnostics["clause_matches"]
-    )
-    assert set(queries) == {"technical", "billing"}
-    assert "500" in queries["technical"]
-    assert "支付" in queries["billing"]
-
-
-def test_same_domain_technical_clauses_are_not_secondary_agents() -> None:
-    message = "开不了机而且屏幕花屏"
-
-    secondary, trigger, _ = detect_compound_intents(
-        message, IntentCategory.TECHNICAL
+    secondary, trigger, diagnostics = detect_compound_intents(
+        message, IntentCategory.INGREDIENT_FIT
     )
 
     assert secondary == []
     assert trigger == "而且"
+    assert diagnostics["clause_intents"] == ["ingredient_fit", "ingredient_fit"]
+    assert len(diagnostics["sub_requests"]) == 2
 
 
-def test_secondary_intents_are_deduplicated_and_hard_limited_to_three() -> None:
-    message = "开不了机，而且我要退款，另外要开发票，以及物流在哪里，同时账户被盗"
-
-    secondary, _, _ = detect_compound_intents(message, IntentCategory.TECHNICAL)
-
-    assert len(secondary) == 3
-    assert secondary == [
-        IntentCategory.REFUND,
-        IntentCategory.INVOICE,
-        IntentCategory.LOGISTICS,
-    ]
-
-
-def test_human_handoff_primary_is_terminal_and_clears_all_secondary_intents() -> None:
-    message = "立刻帮我转人工，顺便查个物流"
-
-    secondary, trigger, diagnostics = detect_compound_intents(
-        message, IntentCategory.HUMAN_HANDOFF
-    )
-
-    assert secondary == []
-    assert trigger == ""
-    assert diagnostics["terminal_handoff"] is True
-
-
-def test_recognize_intent_attaches_compound_fields_and_scoped_queries(monkeypatch) -> None:
-    async def fake_llm(message, history=None):
-        return _llm(IntentCategory.TECHNICAL)
-
-    async def fake_embedding(message):
-        return _embedding(IntentCategory.TECHNICAL)
-
-    monkeypatch.setattr(recognizer, "_recognize_with_llm", fake_llm)
-    monkeypatch.setattr(recognizer, "_recognize_with_embedding", fake_embedding)
-    monkeypatch.setattr(
-        recognizer,
-        "_pattern_recognize",
-        lambda message: _pattern(IntentCategory.TECHNICAL),
-    )
-
-    result = _run(recognize_intent("电脑开不了机，修不好怎么退货？"))
-
-    assert result.intent is IntentCategory.TECHNICAL
-    assert result.secondary_intents == [IntentCategory.REFUND]
-    assert result.compound_trigger == "，"
-    assert result.intent_diagnostics["scoped_retrieval_queries"]["billing"] == (
-        "修不好怎么退货"
-    )
-
-
-def test_recognize_intent_clears_secondary_for_handoff(monkeypatch) -> None:
-    async def fake_llm(message, history=None):
-        return _llm(IntentCategory.HUMAN_HANDOFF)
-
-    async def fake_embedding(message):
-        return _embedding(IntentCategory.HUMAN_HANDOFF)
-
-    monkeypatch.setattr(recognizer, "_recognize_with_llm", fake_llm)
-    monkeypatch.setattr(recognizer, "_recognize_with_embedding", fake_embedding)
-    monkeypatch.setattr(
-        recognizer,
-        "_pattern_recognize",
-        lambda message: _pattern(IntentCategory.HUMAN_HANDOFF),
-    )
-
-    result = _run(recognize_intent("立刻帮我转人工，顺便查个物流"))
-
-    assert result.intent is IntentCategory.HUMAN_HANDOFF
-    assert result.secondary_intents == []
-    assert result.compound_trigger == ""
-
-
-def test_low_confidence_compound_message_uses_first_specific_subrequest_as_primary(monkeypatch) -> None:
-    async def fake_llm(message, history=None):
-        return _llm(IntentCategory.OTHER, confidence=0.2)
-
-    async def fake_embedding(message):
-        return _embedding(IntentCategory.OTHER, score=0.1)
-
-    monkeypatch.setattr(recognizer, "_recognize_with_llm", fake_llm)
-    monkeypatch.setattr(recognizer, "_recognize_with_embedding", fake_embedding)
-    monkeypatch.setattr(
-        recognizer,
-        "_pattern_recognize",
-        lambda message: _pattern(IntentCategory.OTHER, confidence=0.0),
-    )
-
+def test_high_confidence_fast_path_still_emits_compound_intents() -> None:
     result = _run(
-        recognize_intent("页面打不开，同时支付是否处于处理中，请分别处理")
+        recognize_intent("订单里漏发了两个小样，同时我要申请退款")
     )
 
-    assert result.intent is IntentCategory.TECHNICAL
-    assert result.secondary_intents == [IntentCategory.PAYMENT_ISSUE]
-    assert result.intent_diagnostics["compound_detected"] is True
+    assert result.intent is IntentCategory.MISSING_ITEM
+    assert result.secondary_intents == [IntentCategory.RETURN_REFUND]
+    assert {item["domain"] for item in result.sub_requests} == {"order", "after_sales"}
+    assert result.intent_diagnostics["scoped_retrieval_queries"] == {
+        "order": "订单里漏发了两个小样",
+        "after_sales": "我要申请退款",
+    }
 
 
-def test_valid_llm_sub_requests_enable_domain_scoped_queries_without_connector(monkeypatch) -> None:
+def test_structured_compound_requests_use_registered_beauty_intents(monkeypatch) -> None:
     async def fake_llm(message, history=None):
         return LLMIntentResult(
-            intent=IntentCategory.TECHNICAL,
+            intent=IntentCategory.HUMAN_HANDOFF,
             confidence=0.9,
-            reasoning="两个独立业务问题",
+            reasoning="未明确要求人工的复合业务请求",
             success=True,
             diagnostics={
                 "llm_is_compound": True,
                 "llm_sub_requests": [
                     {
-                        "id": "a",
-                        "text": "登录时报错",
-                        "domain": "technical",
-                        "intent": IntentCategory.TECHNICAL_LOGIN.value,
+                        "id": "order-child",
+                        "text": "订单里漏发两个小样",
+                        "domain": "order",
+                        "intent": "missing_item",
                         "confidence": 0.9,
                     },
                     {
-                        "id": "b",
+                        "id": "refund-child",
                         "text": "申请退款",
-                        "domain": "billing",
-                        "intent": IntentCategory.REFUND.value,
+                        "domain": "after_sales",
+                        "intent": "return_refund",
                         "confidence": 0.9,
                     },
                 ],
             },
         )
 
-    monkeypatch.setattr(recognizer, "_recognize_with_llm", fake_llm)
     async def fake_embedding(message):
-        return _embedding(IntentCategory.TECHNICAL, score=0.9)
+        return EmbeddingIntentResult(
+            intent=IntentCategory.OTHER,
+            score=0.0,
+            success=False,
+        )
 
+    monkeypatch.setattr(recognizer, "_recognize_with_llm", fake_llm)
     monkeypatch.setattr(recognizer, "_recognize_with_embedding", fake_embedding)
     monkeypatch.setattr(
         recognizer,
         "_pattern_recognize",
-        lambda message: _pattern(IntentCategory.TECHNICAL, confidence=0.8),
+        lambda message: _pattern(IntentCategory.OTHER),
     )
 
-    result = _run(recognize_intent("登录时报错 申请退款"))
+    result = _run(recognize_intent("请分别处理漏发小样和申请退款"))
 
-    assert result.secondary_intents == [IntentCategory.REFUND]
-    assert result.intent_diagnostics["scoped_retrieval_queries"] == {
-        "technical": "登录时报错",
-        "billing": "申请退款",
-    }
+    assert result.intent is IntentCategory.MISSING_ITEM
+    assert result.secondary_intents == [IntentCategory.RETURN_REFUND]
+    assert result.intent_diagnostics["primary_sub_request_id"] == "order-child"
+    assert result.intent_diagnostics["compound_top_level_handoff_ignored"] is True
+
+
+@pytest.mark.parametrize(
+    ("message", "primary", "expected_scopes"),
+    [
+        (
+            "这款粉底液适合敏感肌吗？另外我的订单漏发了小样",
+            IntentCategory.INGREDIENT_FIT,
+            {"consult": "这款粉底液适合敏感肌吗", "order": "我的订单漏发了小样"},
+        ),
+        (
+            "粉底液主要成分有哪些？同时物流三天没更新",
+            IntentCategory.INGREDIENT_FIT,
+            {"consult": "粉底液主要成分有哪些", "order": "物流三天没更新"},
+        ),
+        (
+            "这款精华适合油皮吗？而且我想申请退款",
+            IntentCategory.INGREDIENT_FIT,
+            {"consult": "这款精华适合油皮吗", "after_sales": "我想申请退款"},
+        ),
+        (
+            "这支口红是什么色号？此外我想退货",
+            IntentCategory.SHADE_MATCH,
+            {"consult": "这支口红是什么色号", "after_sales": "我想退货"},
+        ),
+        (
+            "我的包裹显示已签收但我没收到，同时我想申请退款",
+            IntentCategory.SIGNED_NOT_RECEIVED,
+            {"order": "我没收到", "after_sales": "我想申请退款"},
+        ),
+        (
+            "订单里漏发小样，另外我想申请退款",
+            IntentCategory.MISSING_ITEM,
+            {"order": "订单里漏发小样", "after_sales": "我想申请退款"},
+        ),
+        (
+            "这个面霜怎么用？并且订单什么时候发货",
+            IntentCategory.USAGE_HOWTO,
+            {"consult": "这个面霜怎么用", "order": "订单什么时候发货"},
+        ),
+        (
+            "优惠券满减规则是什么？另外快递一直没更新",
+            IntentCategory.PROMO_RULES,
+            {"consult": "优惠券满减规则是什么", "order": "快递一直没更新"},
+        ),
+    ],
+)
+def test_cross_domain_compound_routes_only_its_clause_to_each_agent(
+    message: str,
+    primary: IntentCategory,
+    expected_scopes: dict[str, str],
+) -> None:
+    """复合消息按意图切成跨域输入，各 Agent 不应收到另一诉求的子句。"""
+
+    secondary, _, diagnostics = detect_compound_intents(message, primary)
+    scopes = build_scoped_retrieval_queries(
+        message, secondary, diagnostics["clause_matches"]
+    )
+    request = Request(
+        message=message,
+        intent=primary,
+        secondary_intents=secondary,
+        sub_requests=diagnostics["sub_requests"],
+        intent_diagnostics={"scoped_retrieval_queries": scopes},
+    )
+
+    assert scopes == expected_scopes
+    for domain, clause in expected_scopes.items():
+        agent_type = {
+            "consult": AgentType.INQUIRY,
+            "order": AgentType.FULFILLMENT,
+            "after_sales": AgentType.REFUND_RISK,
+        }[domain]
+        scoped = _request_for_agent(request, agent_type)
+        assert scoped.message == clause
+        for other_domain, other_clause in expected_scopes.items():
+            if other_domain != domain:
+                assert other_clause not in scoped.message

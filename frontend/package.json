@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test tests/api.test.js tests/handoff-presentation.test.js tests/chat-layout.test.js",
     "build": "vite build",
     "preview": "vite preview"
   },

@@ -1,11 +1,17 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
-import { sendChat } from '../api/index.js'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { answerSlot, getConsumerMessages, streamChat } from '../api/index.js'
+import { mergeCustomerServiceMessages } from '../lib/consumer-message-sync.js'
+import { latestQuestionAssistant, unansweredSlotQuestions } from '../lib/slot-questions.js'
 
 const emit = defineEmits(['sessions-changed'])
+const props = defineProps({ userId: { type: String, default: 'consumer-demo' }, token: { type: String, default: '' } })
 const STORAGE_KEY = 'shopcare_sessions'
-const USER_ID = 'anonymous'
-const quickPrompts = ['退款申请', '技术排查', '发票咨询']
+const quickPrompts = ['成分与肤质适配', '订单物流查询', '退货退款申请']
+
+function agentLabel(value) {
+  return { consult: 'Consult Agent', order: 'Order Agent', after_sales: 'After Sales Agent', escalation: '人工接管' }[value] || value || '未知'
+}
 
 function createId() {
   return globalThis.crypto?.randomUUID?.() || `conv-${Date.now()}-${Math.random().toString(16).slice(2)}`
@@ -13,7 +19,7 @@ function createId() {
 
 function readSessions() {
   try {
-    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
+    const stored = JSON.parse(localStorage.getItem(`${STORAGE_KEY}:${props.userId}`) || '[]')
     return Array.isArray(stored) ? stored : []
   } catch {
     return []
@@ -21,7 +27,7 @@ function readSessions() {
 }
 
 function createSession() {
-  return { id: createId(), createdAt: new Date().toISOString(), messages: [] }
+  return { id: createId(), createdAt: new Date().toISOString(), messages: [], lastMessageSeq: 0 }
 }
 
 function escapeHtml(value) {
@@ -168,9 +174,15 @@ const input = ref('')
 const sending = ref(false)
 const errorMessage = ref('')
 const stream = ref(null)
+const streamStatus = ref('正在准备处理')
+const progressSteps = ref([
+])
+let messageSyncTimer = null
+let messageSyncInFlight = false
 
 const activeSession = computed(() => sessions.value.find((session) => session.id === activeId.value) || sessions.value[0])
 const messages = computed(() => activeSession.value?.messages || [])
+const latestAssistantMessage = computed(() => latestQuestionAssistant(messages.value))
 
 function sessionSummary(session) {
   const firstUserMessage = session.messages.find((item) => item.role === 'user')?.content || '新会话'
@@ -182,7 +194,7 @@ function emitSessionSummaries() {
 }
 
 function persist() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions.value))
+  localStorage.setItem(`${STORAGE_KEY}:${props.userId}`, JSON.stringify(sessions.value))
   emitSessionSummaries()
 }
 
@@ -213,11 +225,56 @@ async function submit(message = input.value) {
   input.value = ''
   errorMessage.value = ''
   sending.value = true
+  progressSteps.value = progressSteps.value.map((step, index) => ({ ...step, state: index === 0 ? 'active' : 'pending' }))
+  const progressId = `progress-${Date.now()}`
+  const safetyOpening = /(烂脸|发红|红肿|起疹|刺痛|瘙痒|过敏|肿胀)/.test(text)
+    ? '收到，请别担心，我先帮您把安全和后续处理理清楚。'
+    : '收到，我先帮您核对这件事，马上给您下一步。'
+  let progressMessage = { role: 'assistant', content: '正在读取会话上下文…', createdAt: new Date().toISOString(), localId: progressId, progress: true }
+  updateSession({ ...session, messages: [...session.messages, progressMessage] })
   try {
     // 以浏览器请求生命周期计时，覆盖网络传输、后端处理与响应渲染前等待，
     // 这样展示给用户的耗时才对应真实体感，而不是只反映后端某个内部阶段。
     const clientStartedAt = performance.now()
-    const result = await sendChat({ message: text, userId: USER_ID, convId: session.id })
+    streamStatus.value = safetyOpening
+    let result = null
+    let streamedText = ''
+    await streamChat({
+      message: text,
+      userId: props.userId,
+      convId: session.id,
+      token: props.token,
+      onEvent: (event, payload) => {
+        if (event !== 'done') {
+          if (event === 'delta') {
+            streamedText += payload.text || ''
+            progressMessage = { ...progressMessage, content: streamedText }
+          } else {
+            if (['context', 'intent', 'knowledge', 'tools', 'response'].includes(event)) {
+              const labels = { context: '读取会话上下文', intent: '意图识别', knowledge: '知识库调用', tools: '工具调用', response: '整理回复' }
+              const next = progressSteps.value.filter((step) => step.key !== event)
+              next.push({ key: event, label: labels[event], state: 'done' })
+              progressSteps.value = next.map((step, index) => ({ ...step, state: index === next.length - 1 ? 'active' : 'done' }))
+            }
+          }
+          streamStatus.value = payload.message || streamStatus.value
+          if (event !== 'delta') progressMessage = { ...progressMessage, content: streamStatus.value }
+          const current = sessions.value.find((item) => item.id === session.id)
+          if (current) updateSession({ ...current, messages: current.messages.map((item) => item.localId === progressId ? progressMessage : item) })
+        }
+        if (event === 'done') result = payload
+        if (event === 'error') throw new Error(payload.message || '请求未完成')
+      },
+    })
+    if (!result) throw new Error('服务未返回完整答复')
+    if (result.intent_diagnostics?.handoff_suppressed) {
+      const current = sessions.value.find((item) => item.id === session.id) || session
+      updateSession({
+        ...current,
+        messages: current.messages.filter((item) => item.localId !== progressId),
+      })
+      return
+    }
     const clientLatencyMs = Math.max(0, performance.now() - clientStartedAt)
     const assistantMessage = {
       role: 'assistant',
@@ -226,12 +283,74 @@ async function submit(message = input.value) {
       // UI 使用 client_latency_ms；server_latency_ms 保留后端 API 计时，便于定位网络与服务端耗时差异。
       metadata: { ...result, latency_ms: clientLatencyMs, client_latency_ms: clientLatencyMs, server_latency_ms: result.latency_ms },
     }
-    updateSession({ ...session, id: result.conv_id || session.id, messages: [...session.messages, assistantMessage] })
+    const current = sessions.value.find((item) => item.id === session.id) || session
+    const ackMessageId = result.intent_diagnostics?.ack_message_id
+    const existingAck = ackMessageId && current.messages.some(
+      (item) => item.metadata?.intent_diagnostics?.ack_message_id === ackMessageId,
+    )
+    updateSession({
+      ...current,
+      id: result.conv_id || session.id,
+      messages: existingAck
+        ? current.messages.filter((item) => item.localId !== progressId)
+        : current.messages.map((item) => item.localId === progressId ? assistantMessage : item),
+    })
     if (result.conv_id && result.conv_id !== activeId.value) activeId.value = result.conv_id
   } catch (error) {
     errorMessage.value = error.message || '请求未完成，请稍后重试。'
+    const current = sessions.value.find((item) => item.id === session.id)
+    if (current) {
+      updateSession({
+        ...current,
+        messages: current.messages.filter((item) => item.localId !== progressId),
+      })
+    }
   } finally {
     sending.value = false
+    progressSteps.value = []
+    streamStatus.value = '正在准备处理'
+  }
+}
+
+async function chooseSlot(message, question, option) {
+  if (sending.value || !activeSession.value) return
+  try {
+    const result = await answerSlot(activeSession.value.id, {
+      question_id: question.question_id,
+      slot_id: question.slot_id,
+      value: option.value,
+    }, props.token)
+    const current = sessions.value.find((item) => item.id === activeSession.value.id)
+    if (!current) return
+    const confirmation = `已记录：${option.label}`
+    updateSession({ ...current, messages: [...current.messages, { role: 'user', content: option.label, createdAt: new Date().toISOString(), slotAnswer: true, slotId: question.slot_id, questionId: question.question_id }, { role: 'assistant', content: confirmation, createdAt: new Date().toISOString(), metadata: { slotAnswer: true, case_state: result.case_state } }] })
+  } catch (error) {
+    errorMessage.value = error.message || '选项暂时无法提交，请稍后重试。'
+  }
+}
+
+async function syncConsumerMessages() {
+  const session = activeSession.value
+  if (!session?.id || !props.token || messageSyncInFlight) return
+  messageSyncInFlight = true
+  try {
+    const response = await getConsumerMessages(session.id, props.token, session.lastMessageSeq || 0)
+    if (activeSession.value?.id !== session.id) return
+    const current = sessions.value.find((item) => item.id === session.id)
+    if (!current) return
+    const merged = mergeCustomerServiceMessages(
+      current.messages,
+      current.lastMessageSeq || 0,
+      response.messages || [],
+      response.last_message_seq,
+    )
+    if (merged.lastMessageSeq !== (Number(current.lastMessageSeq) || 0) || merged.messages.length !== current.messages.length) {
+      updateSession({ ...current, messages: merged.messages, lastMessageSeq: merged.lastMessageSeq })
+    }
+  } catch {
+    // 轮询只补齐另一端消息；会话尚未写入服务端或短暂断网时不打断消费者操作。
+  } finally {
+    messageSyncInFlight = false
   }
 }
 
@@ -247,6 +366,15 @@ watch(messages, async () => {
   await nextTick()
   if (stream.value) stream.value.scrollTop = stream.value.scrollHeight
 }, { deep: true })
+watch(activeId, () => { void syncConsumerMessages() })
+
+onMounted(() => {
+  void syncConsumerMessages()
+  messageSyncTimer = window.setInterval(syncConsumerMessages, 2000)
+})
+onUnmounted(() => {
+  if (messageSyncTimer) window.clearInterval(messageSyncTimer)
+})
 
 defineExpose({ startNewConversation, selectSession })
 </script>
@@ -266,18 +394,40 @@ defineExpose({ startNewConversation, selectSession })
 
         <article v-for="(message, index) in messages" :key="`${message.createdAt}-${index}`" class="message-row" :class="message.role">
           <div class="message-bubble">
-            <div v-if="message.role === 'assistant'" class="message-content markdown-content" v-html="renderMarkdown(message.content)"></div>
+            <div v-if="message.role === 'customer_service'" class="message-sender-label">人工客服</div>
+            <details v-if="message.progress" class="progress-details" open>
+              <summary>已收到，正在处理</summary>
+              <div class="progress-steps">
+                <div v-for="step in progressSteps" :key="step.key" class="progress-step" :class="step.state">
+                  <span class="progress-dot">{{ step.state === 'done' ? '✓' : step.state === 'active' ? '·' : '○' }}</span>
+                  <span>{{ step.label }}</span>
+                </div>
+              </div>
+            </details>
+            <div v-else-if="message.role === 'assistant'" class="message-content markdown-content" v-html="renderMarkdown(message.content)"></div>
             <div v-else class="message-content">{{ message.content }}</div>
-            <div v-if="message.role === 'assistant'" class="message-meta">
-              节点: {{ message.metadata?.agent_type || '未知' }} · 端到端耗时: {{ formatLatency(message.metadata?.latency_ms) }} · 知识库: {{ message.metadata?.knowledge_used ? '已引用' : '无' }}
+            <div v-if="message.role === 'assistant' && !message.progress" class="message-meta">
+              节点: {{ agentLabel(message.metadata?.agent_type) }} · 端到端耗时: {{ formatLatency(message.metadata?.latency_ms) }} · 知识库: {{ message.metadata?.knowledge_used ? '已引用' : '无' }}
             </div>
+            <details v-if="message.role === 'assistant' && !message.progress && message.metadata" class="result-trace">
+              <summary>查看本次真实处理结果</summary>
+              <p>意图：{{ message.metadata.intent || '未返回' }}</p>
+              <p>知识库：{{ message.metadata.knowledge_used ? '已实际引用' : '本次未调用' }}</p>
+              <p>工具：{{ message.metadata.tools_used?.length ? message.metadata.tools_used.join('、') : '本次未调用工具' }}</p>
+            </details>
           </div>
-          <div v-if="message.role === 'assistant' && (message.metadata?.escalated || message.metadata?.agent_recommended_handoff)" class="handoff-card">
-            提示：当前诉求涉及人工复核，建议转接人工坐席处理。
+          <div v-if="message.role === 'assistant' && !message.progress && (message.metadata?.escalated || message.metadata?.agent_recommended_handoff)" class="handoff-card">
+            已为您转接人工，请稍等。客服会继续查看当前会话，不需要您重复描述。
+          </div>
+          <div v-if="message === latestAssistantMessage && unansweredSlotQuestions(message, messages).length" class="follow-up-options">
+            <span class="follow-up-label">为了更快帮您处理，可以直接选择：</span>
+            <template v-for="question in unansweredSlotQuestions(message, messages)" :key="question.question_id">
+              <span class="follow-up-label">{{ question.text }}</span>
+              <button v-for="option in question.options" :key="`${question.question_id}-${option.value}`" class="chip-button" type="button" @click="chooseSlot(message, question, option)">{{ option.label }}</button>
+            </template>
           </div>
         </article>
 
-        <div v-if="sending" class="loading-copy" role="status">正在整理答复</div>
         <div v-if="errorMessage" class="error-copy" role="alert">{{ errorMessage }}</div>
       </div>
 

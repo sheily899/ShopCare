@@ -2,6 +2,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from memory.conversation_memory import MemoryManager, MsgRole
 
 
@@ -75,6 +77,15 @@ def _run(coroutine):
     return asyncio.run(coroutine)
 
 
+@pytest.fixture(autouse=True)
+def _use_deterministic_test_embedding(monkeypatch):
+    """Profile tests verify write contracts without loading a real model."""
+    monkeypatch.setattr(
+        "memory.conversation_memory._local_memory_embedding",
+        lambda texts: [[0.1, 0.2, 0.3] for _ in texts],
+    )
+
+
 async def _seed(manager):
     await manager.add_message("u-1", "c-1", MsgRole.USER, "我只用顺丰快递")
     await manager.add_message("u-1", "c-1", MsgRole.USER, "订单 ORD-1001 请尽快送达")
@@ -108,6 +119,8 @@ def test_update_profile_extracts_json_and_persists_stable_document():
     call = collection.upsert_calls[0]
     assert call["ids"] == ["profile:u-1"]
     assert json.loads(call["documents"][0]) == payload
+    assert len(call["embeddings"]) == 1
+    assert all(isinstance(value, float) for value in call["embeddings"][0])
     metadata = call["metadatas"][0]
     assert metadata["user_id"] == "u-1"
     assert metadata["conv_id"] == "c-1"

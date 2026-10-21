@@ -88,54 +88,54 @@ def test_low_confidence_other_returns_clarification_without_agent() -> None:
     assert decision.primary_agent is None
     assert decision.supporting_agents == []
     assert decision.confidence == 0.3
-    assert "请补充一下是订单物流、退款账单、账户资料，还是技术故障" in decision.reason
+    assert "产品咨询、订单物流，还是售后退款与使用不适" in decision.reason
 
 
-def test_domain_scores_use_technical_keywords_and_entities() -> None:
-    """Technical 主意图、错误码和技术词应使技术分数最高。"""
+def test_domain_scores_use_order_intent_and_order_entities() -> None:
+    """订单意图、订单号和物流词应使履约域分数最高。"""
 
     request = Request(
-        message="登录失败并出现 401 报错，网络也无法连接",
-        intent=IntentCategory.TECHNICAL_LOGIN,
-        entities={"error_code": ["401"]},
+        message="订单 SC-DEMO-4821 的物流到哪里了",
+        intent=IntentCategory.LOGISTICS_STALLED,
+        entities={"order_id": ["SC-DEMO-4821"]},
     )
     result = _intent_result(
-        IntentCategory.TECHNICAL_LOGIN,
-        entities={"error_code": ["401"]},
+        IntentCategory.LOGISTICS_STALLED,
+        entities={"order_id": ["SC-DEMO-4821"]},
     )
     scores = _domain_scores(request, result)
 
-    assert scores["technical"] > scores["general"]
-    assert scores["technical"] > scores["billing"]
+    assert scores["order"] > scores["consult"]
+    assert scores["order"] > scores["after_sales"]
     decision = _route_decision(request, result)
-    assert decision.primary_agent is AgentType.TECHNICAL
+    assert decision.primary_agent is AgentType.FULFILLMENT
 
 
 def test_supporting_agents_only_map_explicit_cross_domain_secondary_intents() -> None:
     """辅助 Agent 只来自 secondary_intents，并过滤同域与人工项。"""
 
     request = Request(
-        message="页面打不开，同时我想确认退款",
-        intent=IntentCategory.TECHNICAL,
+        message="订单物流慢，同时我想确认价保",
+        intent=IntentCategory.LOGISTICS_STALLED,
         intent_confidence=0.9,
-        entities={"error_code": ["500"]},
+        entities={"order_id": ["SC-DEMO-4821"]},
         secondary_intents=[
-            IntentCategory.TECHNICAL_CRASH,
-            IntentCategory.REFUND,
+            IntentCategory.MISSING_ITEM,
+            IntentCategory.PRICE_PROTECTION,
             IntentCategory.HUMAN_HANDOFF,
-            IntentCategory.REFUND,
+            IntentCategory.PRICE_PROTECTION,
         ],
     )
     result = _intent_result(
-        IntentCategory.TECHNICAL,
+        IntentCategory.LOGISTICS_STALLED,
         entities=request.entities,
         secondary=request.secondary_intents,
     )
 
     decision = _route_decision(request, result)
 
-    assert decision.primary_agent is AgentType.TECHNICAL
-    assert decision.supporting_agents == [AgentType.BILLING]
+    assert decision.primary_agent is AgentType.FULFILLMENT
+    assert decision.supporting_agents == [AgentType.REFUND_RISK]
 
 
 class _FakeAgent:
@@ -156,14 +156,14 @@ class _FakeAgent:
         return self.response
 
 
-def test_execute_technical_exception_falls_back_to_general(monkeypatch: Any) -> None:
-    """Technical 异常应自动调用 General 并返回兜底结果。"""
+def test_execute_business_domain_failure_does_not_fall_back_to_consult(monkeypatch: Any) -> None:
+    """订单域失败不能转给咨询 Agent 猜答或暴露原始异常。"""
 
-    technical = _FakeAgent(error=RuntimeError("technical down"))
-    general = _FakeAgent(
+    order_agent = _FakeAgent(error=RuntimeError("order lookup failed"))
+    consult_agent = _FakeAgent(
         response=AgentResponse(
-            agent_type=AgentType.GENERAL,
-            content="通用兜底回复",
+            agent_type=AgentType.INQUIRY,
+            content="没有订单依据的猜测",
             success=True,
         )
     )
@@ -171,15 +171,15 @@ def test_execute_technical_exception_falls_back_to_general(monkeypatch: Any) -> 
         orchestrator_module,
         "AGENT_POOL",
         {
-            AgentType.TECHNICAL: technical,
-            AgentType.GENERAL: general,
+            AgentType.FULFILLMENT: order_agent,
+            AgentType.INQUIRY: consult_agent,
         },
     )
 
-    result = _run(_execute(Request(message="页面打不开"), AgentType.TECHNICAL))
+    result = _run(_execute(Request(message="订单物流查询"), AgentType.FULFILLMENT))
 
-    assert result.success is True
-    assert result.agent_type is AgentType.GENERAL
-    assert result.content == "通用兜底回复"
-    assert technical.calls == 1
-    assert general.calls == 1
+    assert result.success is False
+    assert result.agent_type is AgentType.FULFILLMENT
+    assert "order lookup failed" not in result.content
+    assert order_agent.calls == 1
+    assert consult_agent.calls == 0

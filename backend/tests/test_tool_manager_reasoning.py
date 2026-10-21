@@ -45,11 +45,11 @@ def build_manager(response):
 
 def test_query_rewrite_keeps_original_and_sends_bounded_llm_request() -> None:
     """改写必须保留原 query，并使用固定的模型调用参数。"""
-    manager = build_manager('{"queries":["退款审核时效", "退款到账周期"]}')
+    manager = build_manager('{"queries":["退款申请条件", "退款审核时效", "退款到账周期"]}')
 
     result = asyncio.run(manager.rewrite_query("退款多久到账？"))
 
-    assert result == ["退款多久到账？", "退款审核时效", "退款到账周期"]
+    assert result == ["退款多久到账？", "退款申请条件", "退款审核时效", "退款到账周期"]
     call = manager._client.messages.calls[0]
     assert call["model"] == "test-model"
     assert call["temperature"] == 0.3
@@ -64,13 +64,13 @@ def test_query_rewrite_keeps_original_and_sends_bounded_llm_request() -> None:
     assert "user_profile" not in prompt
 
 
-def test_query_rewrite_accepts_fenced_json_and_deduplicates() -> None:
-    """Markdown fenced JSON 可解析，重复改写不能重复召回。"""
+def test_query_rewrite_accepts_fenced_json_and_requires_three_distinct_rewrites() -> None:
+    """Markdown fenced JSON 可解析；不足三条独立改写时降级到原句。"""
     manager = build_manager('```json\n{"queries":["原始问题", "改写问题", "改写问题"]}\n```')
 
     result = asyncio.run(manager.rewrite_query("原始问题"))
 
-    assert result == ["原始问题", "改写问题"]
+    assert result == ["原始问题"]
 
 
 def test_query_rewrite_invalid_shape_always_falls_back_to_original() -> None:
@@ -78,6 +78,7 @@ def test_query_rewrite_invalid_shape_always_falls_back_to_original() -> None:
     invalid_responses = [
         "not-json",
         '{"queries": []}',
+        '{"queries": ["一", "二"]}',
         '{"queries": ["有效", 42]}',
         '{"queries": ["一", "二", "三", "四"]}',
         '{"queries": ["   "]}',
@@ -106,13 +107,13 @@ def test_parallel_recall_starts_all_queries_and_uses_minimum_recall_k() -> None:
     calls = []
 
     async def fake_rewrite(query: str, n: int = 3):
-        return ["q1", "q2", "q3"]
+        return ["原始问题", "q1", "q2", "q3"]
 
     async def fake_call(name, params, context=None, *, use_cache=True):
         nonlocal started
         started += 1
         calls.append((name, params, context, use_cache))
-        if started == 3:
+        if started == 4:
             ready.set()
         await release.wait()
         return ToolResult(name=name, success=True, data=[{"source_chunk_id": params["query"]}])
@@ -125,14 +126,14 @@ def test_parallel_recall_starts_all_queries_and_uses_minimum_recall_k() -> None:
             manager.search_with_rewrite("knowledge", "原始问题", top_k=2, context={"trace": "t1"})
         )
         await asyncio.wait_for(ready.wait(), timeout=1.0)
-        assert started == 3
+        assert started == 4
         release.set()
         return await task
 
     result = asyncio.run(run())
 
     assert result.success is True
-    assert [item[1]["query"] for item in calls] == ["q1", "q2", "q3"]
+    assert [item[1]["query"] for item in calls] == ["原始问题", "q1", "q2", "q3"]
     assert all(item[1]["top_k"] == 5 for item in calls)
     assert all(item[3] is True for item in calls)
     assert result.reranked is False

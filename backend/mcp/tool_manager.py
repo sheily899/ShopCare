@@ -692,8 +692,8 @@ class MCPToolManager:
         # 不携带 history/context 可避免会话隐私污染公共知识检索。
         prompt = (
             f"将以下用户查询改写为 {rewrite_count} 个不同角度的搜索子查询，用于检索知识库。\n"
-            "要求：每个子查询角度不同，覆盖原始问题的不同方面；只返回 JSON 对象，"
-            f"格式为 {{\"queries\": [\"子查询1\", \"子查询2\"]}}，最多返回 {rewrite_count} 条。\n"
+            "要求：每个子查询角度不同，不重复原句；只返回 JSON 对象，"
+            f"格式为 {{\"queries\": [\"子查询1\", \"子查询2\", \"子查询3\"]}}，必须恰好返回 {rewrite_count} 条。\n"
             f"原始查询：{original_query}"
         )
         try:
@@ -712,15 +712,17 @@ class MCPToolManager:
             queries = payload.get("queries") if isinstance(payload, dict) else None
             if (
                 not isinstance(queries, list)
-                or not queries
-                or len(queries) > rewrite_count
+                or len(queries) != rewrite_count
                 or any(not isinstance(item, str) or not item.strip() for item in queries)
             ):
-                raise ValueError("查询改写结果必须是非空字符串数组，且不超过指定数量")
+                raise ValueError(f"查询改写结果必须恰好包含 {rewrite_count} 条非空字符串")
 
             # Why：保留原始 query 可防止改写遗漏关键实体；dict 顺序同时保证结果稳定。
             normalized = [item.strip() for item in queries]
-            return list(dict.fromkeys([original_query] + normalized))
+            unique_rewrites = list(dict.fromkeys(normalized))
+            if len(unique_rewrites) != rewrite_count or original_query in unique_rewrites:
+                raise ValueError("三条改写必须彼此不同，且不能重复原始查询")
+            return [original_query, *unique_rewrites]
         except Exception as exc:
             logger.warning("查询改写失败，使用原始 query：%s", exc)
             return [original_query]
@@ -731,6 +733,8 @@ class MCPToolManager:
         query: str,
         top_k: int = 5,
         context: Optional[Dict[str, Any]] = None,
+        *,
+        domain: Optional[str] = None,
     ) -> ToolResult:
         """执行 Query Rewrite、并行召回和稳定去重，不执行 Rerank。
 
@@ -739,6 +743,7 @@ class MCPToolManager:
             query: 用户原始检索问题。
             top_k: 下游希望的结果规模；每路召回至少使用 5 条。
             context: 传给底层 Tool handler 的可选上下文。
+            domain: 可选的强制业务域；传入后每条改写查询都携带该域。
 
         Returns:
             ``ToolResult``；成功时 data 是完整去重候选集，失败时 data 为空列表。
@@ -752,7 +757,11 @@ class MCPToolManager:
         tasks = [
             self.call(
                 tool_name,
-                {"query": sub_query, "top_k": recall_k},
+                {
+                    "query": sub_query,
+                    "top_k": recall_k,
+                    **({"domain": domain} if domain else {}),
+                },
                 context,
                 use_cache=True,
             )
@@ -785,7 +794,13 @@ class MCPToolManager:
                 success=False,
                 data=[],
                 error="所有子查询均无结果",
-                metadata={"original_query": query, "queries": sub_queries, "recall_k": recall_k},
+                metadata={
+                    "original_query": query,
+                    "queries": sub_queries,
+                    **({"domain": domain} if domain else {}),
+                    "recall_k": recall_k,
+                    "rewrite_degraded": len(sub_queries) != 4,
+                },
             )
 
         return ToolResult(
@@ -797,9 +812,76 @@ class MCPToolManager:
             metadata={
                 "original_query": query,
                 "queries": sub_queries,
+                **({"domain": domain} if domain else {}),
                 "recall_k": recall_k,
                 "candidate_count": len(merged),
             },
+        )
+
+    async def search_scoped(
+        self,
+        query: str,
+        top_k: int,
+        domain: str,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> ToolResult:
+        """执行单一业务域内的原句 + 三条改写召回、去重和重排。
+
+        领域参数被写入每次底层工具调用和缓存键；未知域直接拒绝，不能回退到
+        全库检索。改写或重排模型不可用时保留对应阶段的显式降级状态。
+        """
+
+        allowed_domains = {"consult", "order", "after_sales"}
+        if domain not in allowed_domains:
+            return ToolResult(
+                name="search_knowledge_base",
+                success=False,
+                data=[],
+                error=f"不支持的知识业务域: {domain}",
+                metadata={"domain": domain, "queries": []},
+            )
+
+        recalled = await self.search_with_rewrite(
+            "search_knowledge_base",
+            query,
+            top_k=top_k,
+            context=context,
+            domain=domain,
+        )
+        candidates = recalled.data if recalled.success and isinstance(recalled.data, list) else []
+        if not candidates:
+            return ToolResult(
+                name="search_knowledge_base",
+                success=False,
+                data=[],
+                error=recalled.error or "业务域内没有检索到可用知识",
+                metadata={**recalled.metadata, "domain": domain},
+            )
+
+        reranked = await self.rerank_results(
+            query,
+            candidates,
+            top_k=top_k,
+            force=True,
+        )
+        metadata = {
+            **recalled.metadata,
+            **reranked.metadata,
+            "domain": domain,
+            "queries": list(recalled.metadata.get("queries") or [query]),
+            "candidate_count": len(candidates),
+        }
+        if len(metadata["queries"]) != 4:
+            metadata["rewrite_degraded"] = True
+        return ToolResult(
+            name="search_knowledge_base",
+            success=reranked.success,
+            data=reranked.data,
+            error=reranked.error or recalled.error,
+            metadata=metadata,
+            reranked=reranked.reranked,
+            rerank_degraded=reranked.rerank_degraded,
         )
 
     async def rerank_results(
@@ -810,6 +892,7 @@ class MCPToolManager:
         *,
         merged_chunks: Optional[List[Dict[str, Any]]] = None,
         requested_top_k: Optional[int] = None,
+        force: bool = False,
     ) -> ToolResult:
         """使用 Anthropic Tool Use 对去重候选进行安全重排序。
 
@@ -819,12 +902,14 @@ class MCPToolManager:
             top_k: 调用方希望最终返回的候选数量。
             merged_chunks: ``candidates`` 的语义别名，兼容编排层命名。
             requested_top_k: ``top_k`` 的语义别名，兼容设计文档命名。
+            force: 即使候选数不超过 top_k 也执行重排；仅供需跨查询比较的领域检索使用。
 
         Returns:
             ``ToolResult``；正常排序时返回模型指定顺序的前 ``top_k`` 条，
             调用失败或置换非法时返回原物理顺序前 ``top_k`` 条并标记降级。
 
-        业务逻辑：只有候选数量超过请求上限才调用 LLM；模型只能返回完整
+        业务逻辑：候选至少 2 条且超过请求上限时调用 LLM；force=True 时即使未超过也调用。
+        模型只能返回完整
         index permutation，任何不完整、重复或越界结果都不能改变原召回顺序。
         """
         rows = merged_chunks if merged_chunks is not None else candidates
@@ -841,7 +926,7 @@ class MCPToolManager:
         }
 
         # Why：不超过 top_k 时没有排序收益，跳过 LLM 可避免额外延迟和 Token 成本。
-        if len(rows) <= requested:
+        if len(rows) < 2 or (len(rows) <= requested and not force):
             return ToolResult(
                 name="rerank_results",
                 success=True,

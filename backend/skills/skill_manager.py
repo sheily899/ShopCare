@@ -159,8 +159,8 @@ class SkillManager:
     def prompt_for_agent(self, agent_type: str) -> str:
         """返回指定 Agent 可见的 Skill Prompt 文本。
 
-        Args:
-            agent_type: Agent 类型，例如 ``technical``、``billing`` 或 ``general``。
+            Args:
+        agent_type: Agent 类型，例如 ``consult``、``order`` 或 ``after_sales``。
 
         Returns:
             只包含启用且声明该 Agent 范围的 Skill 正文，超过上限时截断。
@@ -171,7 +171,13 @@ class SkillManager:
         for spec in self.specs.values():
             if not spec.enabled or target not in spec.agents:
                 continue
-            sections.append(f"[Skill：{spec.name}]\n{spec.content}")
+            keyword_text = "、".join(spec.keywords)
+            sections.append(
+                f"[Skill：{spec.name}]\n"
+                f"用途：{spec.description}\n"
+                f"适用主题：{keyword_text}\n"
+                f"{spec.content}"
+            )
         # Why：5000 字符上限控制每轮 Tool Use 的上下文成本，避免 Skill 文本挤占用户问题和检索证据。
         return "\n\n".join(sections)[: self.max_prompt_chars]
 

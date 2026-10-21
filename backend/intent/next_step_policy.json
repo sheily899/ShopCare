@@ -1,0 +1,24 @@
+{
+  "version": "1.0",
+  "policies": {
+    "ingredient_fit": {"steps": ["根据成分资料回答适配范围", "提醒先做局部测试"], "sources": ["intent", "knowledge"]},
+    "shade_match": {"steps": ["确认肤色与妆效需求", "提供可选色号并提示试色"], "sources": ["intent", "case_state", "knowledge"]},
+    "usage_howto": {"steps": ["核对产品与使用场景", "按资料说明使用顺序和频次"], "sources": ["intent", "knowledge"]},
+    "product_info": {"steps": ["核对商品规格与资料", "回答容量、功效定位等固定信息"], "sources": ["intent", "knowledge"]},
+    "promo_rules": {"steps": ["核对活动适用条件", "根据订单记录说明优惠或赠品状态"], "sources": ["intent", "order_result", "knowledge"]},
+    "pregnancy_safety": {"steps": ["提供已确认的资料信息", "涉及孕期或用药时建议咨询医生"], "sources": ["intent", "knowledge", "safety_rule"]},
+    "order_status": {"steps": ["查询订单状态", "告知当前节点与可执行的下一步"], "sources": ["intent", "order_result"]},
+    "logistics_stalled": {"steps": ["查询物流最新节点", "判断是否达到催查条件并提交物流核验"], "sources": ["intent", "order_result", "logistics_result"]},
+    "signed_not_received": {"steps": ["核对签收时间、地址和代收信息", "提交物流异常核验"], "sources": ["intent", "order_result", "logistics_result"]},
+    "intercept_change_address": {"steps": ["核对订单是否已发货", "提交拦截或改址请求并等待物流确认"], "sources": ["intent", "order_result", "logistics_result"]},
+    "missing_item": {"steps": ["核对订单明细与缺少商品", "确认补发或退款处理方式"], "sources": ["intent", "order_result", "ticket_policy"]},
+    "wrong_item": {"steps": ["核对订单规格与实际收到商品", "确认换货或退回处理方式"], "sources": ["intent", "order_result", "ticket_policy"]},
+    "damaged_on_arrival": {"steps": ["核对破损范围与订单信息", "提交质量或仓储核验"], "sources": ["intent", "order_result", "ticket_policy"]},
+    "return_refund": {"steps": ["核对订单与退货条件", "确认符合条件后的退款处理方式"], "sources": ["intent", "order_result", "knowledge", "ticket_policy"]},
+    "adverse_reaction": {"steps": ["确认是否出现呼吸不适或症状持续加重", "记录风险并交由人工确认"], "sources": ["intent", "case_state", "order_result", "safety_rule", "ticket_policy"]},
+    "suspected_abnormal_refund": {"steps": ["核对订单与退款记录", "提交风控人工审核，不直接下结论"], "sources": ["intent", "order_result", "refund_result", "risk_rule"]},
+    "price_protection": {"steps": ["核对下单时间与当前价格", "按规则计算价差并提交审核"], "sources": ["intent", "order_result", "knowledge", "ticket_policy"]},
+    "refund_not_received": {"steps": ["核对退款发起时间与状态", "确认支付渠道后查询到账进度"], "sources": ["intent", "order_result", "refund_result"]},
+    "shipping_fee_reimbursement": {"steps": ["核对运费承担条件", "确认凭证与报销金额后提交审核"], "sources": ["intent", "order_result", "knowledge", "ticket_policy"]}
+  }
+}

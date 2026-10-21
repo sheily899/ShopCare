@@ -13,37 +13,30 @@ from agents.agent_orchestrator import (
     Request,
     RoutingDecision,
 )
+from intent.beauty_intent_registry import BEAUTY_INTENT_BY_ID
 from intent.intent_recognizer import IntentCategory, IntentResult, UrgencyLevel
 
 
 EXPECTED_INTENTS = {
-    "query",
-    "complaint",
-    "request",
-    "greeting",
-    "technical",
-    "billing",
-    "account",
-    "feedback",
-    "order_status",
-    "logistics",
-    "refund",
-    "invoice",
-    "payment_issue",
-    "account_security",
-    "technical_login",
-    "technical_crash",
+    *BEAUTY_INTENT_BY_ID,
     "human_handoff",
     "other",
+}
+
+EXPECTED_AGENTS = {
+    "consult",
+    "order",
+    "after_sales",
+    "escalation",
 }
 
 
 def _intent_result() -> IntentResult:
     return IntentResult(
-        intent=IntentCategory.QUERY,
+        intent=IntentCategory.PRODUCT_INFO,
         confidence=0.8,
         urgency=UrgencyLevel.LOW,
-        intent_group="query",
+        intent_group="consult",
         entities={
             "order_id": [],
             "product": [],
@@ -58,7 +51,7 @@ def _intent_result() -> IntentResult:
 
 def _agent_profile() -> AgentProfile:
     return AgentProfile(
-        role="general",
+        role="consult",
         mission="answer safely",
         workflow=("inspect",),
         input_contract=("message",),
@@ -68,7 +61,7 @@ def _agent_profile() -> AgentProfile:
 
 def _agent_response() -> AgentResponse:
     return AgentResponse(
-        agent_type=AgentType.GENERAL,
+        agent_type=AgentType.INQUIRY,
         content="ok",
         success=True,
     )
@@ -82,14 +75,14 @@ def _orchestrator_result() -> OrchestratorResult:
     return OrchestratorResult(
         request_id="req-1",
         response="ok",
-        agent_type=AgentType.GENERAL,
-        intent=IntentCategory.QUERY,
+        agent_type=AgentType.INQUIRY,
+        intent=IntentCategory.PRODUCT_INFO,
     )
 
 
-def test_intent_category_has_exact_values_and_compatible_alias() -> None:
-    assert {item.value for item in IntentCategory} == EXPECTED_INTENTS
-    assert len(list(IntentCategory)) == 18
+def test_intent_category_keeps_registered_beauty_and_control_values() -> None:
+    assert EXPECTED_INTENTS <= {item.value for item in IntentCategory}
+    assert len(BEAUTY_INTENT_BY_ID) == 19
     assert IntentCategory.ESCALATION is IntentCategory.HUMAN_HANDOFF
     assert IntentCategory.ESCALATION.value == "human_handoff"
 
@@ -102,12 +95,7 @@ def test_urgency_level_is_int_enum_with_values_one_to_four() -> None:
 def test_intent_and_agent_enums_are_string_enums() -> None:
     assert issubclass(IntentCategory, str)
     assert issubclass(AgentType, str)
-    assert {item.value for item in AgentType} == {
-        "general",
-        "technical",
-        "billing",
-        "escalation",
-    }
+    assert {item.value for item in AgentType} == EXPECTED_AGENTS
 
 
 def test_dataclass_contracts_instantiate_with_spec_defaults() -> None:

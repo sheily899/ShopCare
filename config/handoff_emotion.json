@@ -1,0 +1,22 @@
+{
+  "version": "handoff-emotion-v1",
+  "model": "claude-3-5-haiku-latest",
+  "max_tokens": 280,
+  "temperature": 0,
+  "system_prompt": "你是客服情绪质检分类器。模型只回答 Q1-Q4 的是/否和原文证据，不得输出情绪类别；类别由代码按 Q1、Q2、Q3、Q4 的优先级计算。当前消息是唯一判定对象，最近对话只用于理解指代和语境。",
+  "questions": [
+    {"id": "threat", "text": "Q1 threat：当前消息是否明确提出投诉、12315、曝光、起诉、平台介入或限期后果？"},
+    {"id": "anger", "text": "Q2 anger：当前消息是否有辱骂、讽刺、指控欺骗/赖账/踢皮球或强烈语气？"},
+    {"id": "dissatisfaction", "text": "Q3 dissatisfaction：当前消息是否批评服务、商品或处理进度，表现出不耐烦？"},
+    {"id": "anxiety", "text": "Q4 anxiety：当前消息是否担心安全、时间或结果，并在寻求保证或指引？"}
+  ],
+  "user_prompt_prefix": "只输出 JSON。每项 answer 必须是 JSON 布尔值；answer=false 时 evidence 必须为空；answer=true 时 evidence 必须从当前待判断消息中逐字摘录最短原句片段。不要引用历史消息作为当前情绪证据。格式：{\"threat\":{\"answer\":false,\"evidence\":\"\"},\"anger\":{\"answer\":false,\"evidence\":\"\"},\"dissatisfaction\":{\"answer\":false,\"evidence\":\"\"},\"anxiety\":{\"answer\":false,\"evidence\":\"\"}}",
+  "negative_prefixes": ["不会", "不打算", "不想", "没有要", "没有说要", "并非要", "不再", "未提出"],
+  "historical_resolved_patterns": ["(?:之前|以前|上次).{0,20}(?:过敏|发红|红肿|肿胀|呼吸困难|水疱).{0,16}(?:这次没事|目前没事|现在没事|已经恢复|已恢复|已经好了|现在好了)"],
+  "fallback_rules": {
+    "threat": ["打12315", "12315", "投诉", "曝光", "起诉", "平台介入", "最后通牒"],
+    "anger": ["骗子", "骗人", "赖账", "什么垃圾", "踢皮球", "无语", "！！！", "!!!"],
+    "dissatisfaction": ["一直没", "怎么还", "第三次", "没人理", "太慢", "不满意"],
+    "anxiety": ["担心", "害怕", "会不会", "严重吗", "怎么办", "着急", "不放心", "来得及吗"]
+  }
+}

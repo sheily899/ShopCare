@@ -15,15 +15,15 @@ from scripts.init_knowledge_base import (
 class InMemoryCollection:
     """提供最小 add/query 行为的内存 Chroma collection。"""
 
-    def __init__(self) -> None:
-        """初始化空的内存记录。"""
+    def __init__(self, embedding_texts):
+        self.embedding_texts = embedding_texts
         self.rows = []
 
     def count(self) -> int:
         """返回当前内存记录数量。"""
         return len(self.rows)
 
-    def add(self, *, ids, documents, metadatas):
+    def add(self, *, ids, documents, metadatas, embeddings):
         """保存 KnowledgeBase 写入的 chunk 和 metadata。"""
         self.rows.extend(
             {
@@ -34,10 +34,15 @@ class InMemoryCollection:
             for item_id, document, metadata in zip(ids, documents, metadatas)
         )
 
-    def query(self, *, query_texts, n_results, include):
-        """按关键词模拟 Chroma 查询并返回固定距离。"""
-        query = query_texts[0]
-        matches = [row for row in self.rows if query in row["document"]]
+    def query(self, *, query_embeddings, n_results, include, where=None):
+        """按显式向量反查测试查询文本，模拟关键词命中并返回固定距离。"""
+        query = self.embedding_texts[tuple(query_embeddings[0])]
+        terms = query.split()
+        matches = [
+            row for row in self.rows
+            if all(term in row["document"] for term in terms)
+            and (where is None or row["metadata"].get("domain") == where.get("domain"))
+        ]
         matches = matches[:n_results]
         return {
             "ids": [[row["id"] for row in matches]],
@@ -65,28 +70,31 @@ class InMemoryClient:
 
 def make_test_knowledge_base(monkeypatch):
     """创建不下载模型、不访问网络的 KnowledgeBase。"""
-    collection = InMemoryCollection()
+    embedding_texts = {}
+    collection = InMemoryCollection(embedding_texts)
+
+    def embed(texts):
+        vectors = []
+        for text in texts:
+            vector = [float(len(embedding_texts) + 1)]
+            embedding_texts[tuple(vector)] = text
+            vectors.append(vector)
+        return vectors
+
     monkeypatch.setattr(
         knowledge_base_module,
         "build_embedding_function",
-        lambda model: {"model": model, "device": "cpu"},
+        lambda model: embed,
     )
     kb = KnowledgeBase(client=InMemoryClient(collection))
     return kb, collection
 
 
-def test_six_source_documents_are_read_and_chunks_are_bounded(monkeypatch):
-    """6 篇源文档均能读取，且所有切片不超过 500 字符。"""
+def test_beauty_source_documents_are_read_and_chunks_are_bounded(monkeypatch):
+    """美妆知识源至少覆盖 50 篇，且切片不超过 500 字符。"""
     documents = load_source_documents(DEFAULT_SOURCE_DIR)
-    assert len(documents) == 6
-    assert {item["source_document_id"] for item in documents} == {
-        "refund_policy",
-        "order_logistics",
-        "account_security",
-        "technical_troubleshooting",
-        "membership_points",
-        "invoice_and_payment",
-    }
+    assert len(documents) >= 50
+    assert all(item["source_document_id"] for item in documents)
 
     kb, _ = make_test_knowledge_base(monkeypatch)
     expected_chunks = validate_chunks(kb, documents)
@@ -99,8 +107,8 @@ def test_six_source_documents_are_read_and_chunks_are_bounded(monkeypatch):
     )
 
 
-def test_ingested_chunks_have_all_seven_metadata_fields(monkeypatch):
-    """实际写入 collection 的每个 chunk 都具备完整七项 metadata。"""
+def test_ingested_chunks_have_domain_metadata(monkeypatch):
+    """实际写入 collection 的每个 chunk 都具备业务域 metadata。"""
     documents = load_source_documents(DEFAULT_SOURCE_DIR)
     kb, collection = make_test_knowledge_base(monkeypatch)
 
@@ -111,6 +119,7 @@ def test_ingested_chunks_have_all_seven_metadata_fields(monkeypatch):
     for row in collection.rows:
         metadata = row["metadata"]
         assert set(metadata) == REQUIRED_METADATA_FIELDS
+        assert metadata["domain"] in {"consult", "order", "after_sales"}
         assert len(row["document"]) <= 500
         assert metadata["source_chunk_id"].startswith(
             f"{metadata['source_document_id']}_chunk_"
@@ -124,9 +133,30 @@ def test_keyword_query_recalls_matching_document_with_distance_score(monkeypatch
     kb, _ = make_test_knowledge_base(monkeypatch)
     kb.add_documents(documents)
 
-    rows = kb.search("原路退回", top_k=3)
+    rows = kb.search("退款", top_k=3)
 
     assert rows
-    assert rows[0]["source_document_id"] == "refund_policy"
-    assert rows[0]["source_chunk_id"].startswith("refund_policy_chunk_")
+    assert "退款" in rows[0]["content"]
+    assert rows[0]["source_chunk_id"]
     assert rows[0]["score"] == round(1 - 0.2, 4)
+
+
+def test_domain_query_never_returns_other_business_domain_chunks(monkeypatch):
+    """指定业务域后，embedding 召回只能返回同域 metadata 的切片。"""
+    documents = load_source_documents(DEFAULT_SOURCE_DIR)
+    kb, _ = make_test_knowledge_base(monkeypatch)
+    kb.add_documents(documents)
+
+    rows = kb.search("退款", top_k=10, domain="consult")
+
+    assert rows
+    assert all(row["domain"] == "consult" for row in rows)
+
+
+def test_all_source_documents_have_one_explicit_business_domain():
+    """当前语料每篇文档都必须被且只被一个业务域映射。"""
+    documents = load_source_documents(DEFAULT_SOURCE_DIR)
+
+    assert len(documents) == 52
+    assert all(item["domain"] in {"consult", "order", "after_sales"} for item in documents)
+    assert len({item["source_document_id"] for item in documents}) == len(documents)

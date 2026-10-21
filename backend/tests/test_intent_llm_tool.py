@@ -12,6 +12,7 @@ except ModuleNotFoundError:  # 依赖基线尚未安装时仍保持异常路径�
 from intent.intent_recognizer import (
     CLASSIFY_INTENT_TOOL,
     IntentCategory,
+    LLM_INTENT_SCHEMA,
     _recognize_with_llm,
 )
 
@@ -34,7 +35,7 @@ def test_llm_tool_use_success_returns_structured_intent_result() -> None:
                 type="tool_use",
                 name="classify_intent",
                 input={
-                    "intent": "refund",
+                    "intent": "return_refund",
                     "confidence": 0.91,
                     "reasoning": "用户明确询问退款流程",
                 },
@@ -51,7 +52,7 @@ def test_llm_tool_use_success_returns_structured_intent_result() -> None:
         )
     )
 
-    assert result.intent is IntentCategory.REFUND
+    assert result.intent is IntentCategory.RETURN_REFUND
     assert result.confidence == 0.91
     assert result.reasoning == "用户明确询问退款流程"
     assert result.success is True
@@ -64,7 +65,7 @@ def test_llm_call_uses_strict_classify_tool_contract() -> None:
                 "type": "tool_use",
                 "name": "classify_intent",
                 "input": {
-                    "intent": "query",
+                    "intent": "product_info",
                     "confidence": 0.8,
                     "reasoning": "用户在询问信息",
                 },
@@ -82,7 +83,9 @@ def test_llm_call_uses_strict_classify_tool_contract() -> None:
     assert schema["required"] == ["intent", "confidence", "reasoning"]
     assert schema["additionalProperties"] is False
     assert set(schema["properties"]["intent"]["enum"]) == {
-        category.value for category in IntentCategory
+        *LLM_INTENT_SCHEMA["enum"],
+        IntentCategory.HUMAN_HANDOFF.value,
+        IntentCategory.OTHER.value,
     }
     assert call["system"]
     assert call["messages"] == [{"role": "user", "content": "怎么查询"}]
@@ -118,7 +121,7 @@ def test_out_of_range_confidence_is_clamped_to_safe_range() -> None:
                 "type": "tool_use",
                 "name": "classify_intent",
                 "input": {
-                    "intent": "query",
+                    "intent": "product_info",
                     "confidence": -0.5,
                     "reasoning": "用户在询问信息",
                 },
@@ -131,7 +134,7 @@ def test_out_of_range_confidence_is_clamped_to_safe_range() -> None:
                 "type": "tool_use",
                 "name": "classify_intent",
                 "input": {
-                    "intent": "query",
+                    "intent": "product_info",
                     "confidence": 1.5,
                     "reasoning": "用户在询问信息",
                 },
@@ -157,7 +160,7 @@ def test_missing_tool_use_or_required_field_degrades_to_other() -> None:
             {
                 "type": "tool_use",
                 "name": "classify_intent",
-                "input": {"intent": "query", "confidence": 0.5},
+                "input": {"intent": "product_info", "confidence": 0.5},
             }
         ]
     )

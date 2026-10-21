@@ -34,7 +34,11 @@ def prepare_corpus(corpus_path: str, collection_name: str = EVALUATION_COLLECTIO
     if len(chunks) != 100:
         raise ValueError(f"正式评测 corpus 必须包含 100 个稳定片段，当前为 {len(chunks)} 个")
     knowledge_base = KnowledgeBase(collection_name=target)
-    count = upsert_stable_chunks(knowledge_base._collection, chunks)
+    count = upsert_stable_chunks(
+        knowledge_base._collection,
+        chunks,
+        knowledge_base._embedding_function,
+    )
     logger.info(
         "评测语料准备完成: collection=%s chunks=%s",
         target,

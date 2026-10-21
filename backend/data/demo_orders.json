@@ -1,0 +1,15 @@
+[
+  {
+    "order_id": "SC-DEMO-4821",
+    "user_id": "consumer-demo",
+    "product_name": "轻透粉底液",
+    "sku": "N02",
+    "order_status": "已签收",
+    "logistics_status": "已签收",
+    "tracking_no": "SF1234567890",
+    "ordered_at": "2026-10-10T10:00:00+08:00",
+    "delivered_at": "2026-10-12T15:20:00+08:00",
+    "gift_items": ["直播赠品小样"],
+    "refund_status": "未申请"
+  }
+]

@@ -35,11 +35,11 @@ class FakeKnowledgeBase:
         self.embedding_model = kwargs.get("embedding_model", "BAAI/bge-small-zh-v1.5")
         self._collection = FakeCollection()
         self._client = SimpleNamespace()
-        self.search_calls: list[tuple[str, int]] = []
+        self.search_calls: list[tuple[str, int, str | None]] = []
         self.added_documents: list[dict] = []
 
-    def search(self, query: str, top_k: int = 5):
-        self.search_calls.append((query, top_k))
+    def search(self, query: str, top_k: int = 5, domain: str | None = None):
+        self.search_calls.append((query, top_k, domain))
         return [
             {
                 "title": "技术排障",
@@ -85,6 +85,10 @@ def _prepare_app(monkeypatch):
     api_main.app.state.knowledge_base = knowledge_base
     api_main.app.state.skill_manager = skill_manager
     api_main.app.state.agent_orchestrator._recent_traces.clear()
+    store = api_main.app.state.sqlite_store
+    identity = store.authenticate("agent-demo", "shopcare")
+    assert identity is not None
+    client.headers.update({"Authorization": f"Bearer {identity['token']}"})
     return client, knowledge_base, skill_manager
 
 
@@ -93,21 +97,28 @@ def test_search_and_knowledge_add_return_structured_results(monkeypatch):
 
     client, knowledge_base, _ = _prepare_app(monkeypatch)
     try:
-        response = client.post("/search", json={"query": "401 认证失败", "top_k": 3})
+        response = client.post(
+            "/search",
+            json={"query": "401 认证失败", "top_k": 3, "domain": "consult"},
+        )
         assert response.status_code == 200
         body = response.json()
         assert body["results"][0]["chunk_id"] == "technical_troubleshooting_chunk_0"
         assert body["results"][0]["title"] == "技术排障"
-        assert knowledge_base.search_calls == [("401 认证失败", 3)]
+        assert knowledge_base.search_calls == [("401 认证失败", 3, "consult")]
 
         add_response = client.post(
             "/knowledge/add",
-            json={"title": "临时规则", "content": "请先检查网络。"},
+            json={
+                "title": "临时规则",
+                "content": "请先检查网络。",
+                "domain": "order",
+            },
         )
         assert add_response.status_code == 200
         assert add_response.json()["added"] == 1
         assert knowledge_base.added_documents == [
-            {"title": "临时规则", "content": "请先检查网络。"}
+            {"title": "临时规则", "content": "请先检查网络。", "domain": "order"}
         ]
     finally:
         client.__exit__(None, None, None)
@@ -121,14 +132,17 @@ def test_knowledge_upload_enforces_suffix_and_ten_mb_limit(monkeypatch):
         response = client.post(
             "/knowledge/upload",
             files={"file": ("guide.md", "标题\n正文".encode("utf-8"), "text/markdown")},
+            data={"domain": "consult"},
         )
         assert response.status_code == 200
         assert response.json()["filename"] == "guide.md"
         assert knowledge_base.added_documents[-1]["content"] == "标题\n正文"
+        assert knowledge_base.added_documents[-1]["domain"] == "consult"
 
         rejected = client.post(
             "/knowledge/upload",
             files={"file": ("payload.exe", b"MZ", "application/octet-stream")},
+            data={"domain": "consult"},
         )
         assert rejected.status_code == 400
 
@@ -141,8 +155,30 @@ def test_knowledge_upload_enforces_suffix_and_ten_mb_limit(monkeypatch):
                     "text/markdown",
                 )
             },
+            data={"domain": "consult"},
         )
         assert oversized.status_code == 400
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_knowledge_writes_require_an_explicit_business_domain(monkeypatch):
+    """认证通过后，新增和上传知识都不能生成未标业务域的数据。"""
+
+    client, knowledge_base, _ = _prepare_app(monkeypatch)
+    try:
+        add_response = client.post(
+            "/knowledge/add",
+            json={"title": "未分类规则", "content": "不能进入知识库。"},
+        )
+        upload_response = client.post(
+            "/knowledge/upload",
+            files={"file": ("unclassified.md", "不能进入知识库。".encode("utf-8"), "text/markdown")},
+        )
+
+        assert add_response.status_code == 422
+        assert upload_response.status_code == 422
+        assert knowledge_base.added_documents == []
     finally:
         client.__exit__(None, None, None)
 
@@ -173,6 +209,29 @@ def test_knowledge_stats_and_trace_memory_routes(monkeypatch):
         assert one_trace.status_code == 200
         assert one_trace.json()["trace"]["request_id"] == "req-1"
         assert client.get("/trace/tool/not-found").status_code == 404
+    finally:
+        client.__exit__(None, None, None)
+
+
+def test_token_trace_routes_expose_stage_usage_without_prompt_content(monkeypatch):
+    """Token 台账只返回阶段用量和内存边界，不暴露原始请求文本。"""
+
+    client, _, _ = _prepare_app(monkeypatch)
+    try:
+        api_main.app.state.token_usage.record_request(
+            "token-1",
+            {"intent": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5}},
+            latency_ms=12.3,
+        )
+        one = client.get("/trace/token/token-1")
+        assert one.status_code == 200
+        assert one.json()["trace"]["total"]["total_tokens"] == 5
+        assert "message" not in one.json()["trace"]
+
+        summary = client.get("/trace/tokens")
+        assert summary.status_code == 200
+        assert summary.json()["by_stage"]["intent"]["total_tokens"] == 5
+        assert summary.json()["restart_loses_data"] is True
     finally:
         client.__exit__(None, None, None)
 

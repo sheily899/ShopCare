@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -26,17 +27,47 @@ class EvaluationRunner:
         client: 可注入的异步 HTTP client，测试时不访问公网。
     """
 
-    def __init__(self, base_url: str, collection_name: str, client: Any) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        collection_name: str,
+        client: Any,
+        preflight_retries: int | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.collection_name = collection_name
         self.client = client
+        configured_retries = (
+            preflight_retries
+            if preflight_retries is not None
+            else int(os.getenv("CUSTOMEROPS_EVAL_PREFLIGHT_RETRIES", "3"))
+        )
+        self.preflight_retries = max(0, int(configured_retries))
 
     async def _preflight(self) -> Mapping[str, Any]:
         """检查服务健康状态和评测 collection，失败立即停止。"""
 
-        response = await self.client.get(f"{self.base_url}/health")
-        if int(getattr(response, "status_code", 0)) != 200:
-            raise RuntimeError(f"/health 不可用: status={getattr(response, 'status_code', None)}")
+        last_error: Exception | None = None
+        transient_statuses = {502, 503, 504}
+        for attempt in range(self.preflight_retries + 1):
+            try:
+                response = await self.client.get(f"{self.base_url}/health")
+            except Exception as exc:
+                last_error = exc
+                if attempt >= self.preflight_retries:
+                    raise RuntimeError(f"/health 请求失败: {exc}") from exc
+                await asyncio.sleep(0.5 * (attempt + 1))
+                continue
+            status_code = int(getattr(response, "status_code", 0))
+            if status_code == 200:
+                break
+            if status_code not in transient_statuses or attempt >= self.preflight_retries:
+                detail = str(getattr(response, "text", "") or "").strip()
+                suffix = f" detail={detail[:300]}" if detail else ""
+                raise RuntimeError(f"/health 不可用: status={status_code}{suffix}")
+            await asyncio.sleep(0.5 * (attempt + 1))
+        else:
+            raise RuntimeError(f"/health 不可用: {last_error or '未知错误'}")
         payload = response.json()
         actual = str(((payload.get("knowledge_base") or {}).get("collection_name")) or "")
         if actual != self.collection_name:
@@ -136,8 +167,10 @@ def write_reports(report: Mapping[str, Any], output_root: str | Path = "evaluati
         encoding="utf-8",
     )
     with (run_dir / "cases.jsonl").open("w", encoding="utf-8") as handle:
-        for case in report["cases"]:
-            handle.write(json.dumps(case, ensure_ascii=False) + "\n")
+        for case, evaluation in zip(report["cases"], report["evaluations"]):
+            record = dict(case)
+            record["evaluation"] = evaluation
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     summary = report["summary"]
     markdown = "\n".join(
         [
@@ -153,6 +186,8 @@ def write_reports(report: Mapping[str, Any], output_root: str | Path = "evaluati
             f"- 知识库 Recall@5 / F1 / MRR：{summary['retrieval_recall_at_5']} / {summary['retrieval_f1']} / {summary['retrieval_mrr']}",
             f"- 复合请求路由准确率：{summary['compound_routing_accuracy']}；明确跨域路由准确率：{summary['explicit_cross_domain_routing_accuracy']}；事实合成诊断值：{summary['compound_resolution_rate']}；复合分母={summary['compound_denominator']}，明确跨域分母={summary['explicit_cross_domain_denominator']}",
             f"- 安全规则筛查通过率（需人工复核）：{summary['safety_pass_rate']}",
+            f"- 端到端业务契约准确率：{summary['e2e_contract_accuracy']}（{summary['e2e_contract_passed']}/{summary['e2e_contract_denominator']}）；失败原因：{summary['e2e_contract_failure_reasons']}",
+            f"- 端到端语义回答准确率：{summary['e2e_semantic_accuracy']}",
             f"- 客户端往返延迟（ms）：P50={summary['client_round_trip_ms']['p50']}；P95={summary['client_round_trip_ms']['p95']}；P99={summary['client_round_trip_ms']['p99']}",
             f"- 成本：{summary['cost']}",
             "",
@@ -168,6 +203,7 @@ async def run_from_files(
     cases_path: str,
     collection_name: str = EVALUATION_COLLECTION_NAME,
     output_root: str = "evaluation/reports",
+    preflight_retries: int | None = None,
 ) -> Path:
     """使用真实 HTTP client 执行一次文件型评测并写报告。"""
 
@@ -175,7 +211,12 @@ async def run_from_files(
     if len(cases) != 100:
         raise ValueError(f"正式评测必须使用完整 100 条案例，当前为 {len(cases)} 条")
     async with httpx.AsyncClient(timeout=60.0) as client:
-        report = await EvaluationRunner(base_url, collection_name, client).run(cases)
+        report = await EvaluationRunner(
+            base_url,
+            collection_name,
+            client,
+            preflight_retries=preflight_retries,
+        ).run(cases)
     return write_reports(report, output_root)
 
 
@@ -187,8 +228,22 @@ def main() -> None:
     parser.add_argument("--cases-path", default="evaluation/datasets/shopcare_evaluation_cases.json")
     parser.add_argument("--collection-name", default=EVALUATION_COLLECTION_NAME)
     parser.add_argument("--output-root", default="evaluation/reports")
+    parser.add_argument(
+        "--preflight-retries",
+        type=int,
+        default=None,
+        help="/health 遇到 502/503/504 或连接错误时的重试次数，默认 3",
+    )
     args = parser.parse_args()
-    output = asyncio.run(run_from_files(args.base_url, args.cases_path, args.collection_name, args.output_root))
+    output = asyncio.run(
+        run_from_files(
+            args.base_url,
+            args.cases_path,
+            args.collection_name,
+            args.output_root,
+            args.preflight_retries,
+        )
+    )
     print(f"evaluation report written: {output}")
 
 

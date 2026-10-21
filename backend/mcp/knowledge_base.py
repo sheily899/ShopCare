@@ -1,7 +1,7 @@
 """ShopCare 产品知识库基础设施。
 
 本模块属于 MCP/RAG 基础层，负责 ChromaDB 客户端初始化、知识文档切片、
-七项切片元数据写入和基础向量检索。它不负责 ToolManager、缓存、熔断、
+带业务域的切片元数据写入和基础向量检索。它不负责 ToolManager、缓存、熔断、
 Query Rewrite 或 Rerank，也不连接任何真实订单或支付系统。
 """
 
@@ -22,13 +22,30 @@ except Exception:  # pragma: no cover - 由运行环境决定
     chromadb = None  # type: ignore
 
 
-DEFAULT_COLLECTION_NAME = "knowledge_base_zh"
-LEGACY_COLLECTION_NAME = "knowledge_base"
+# 集合名包含 embedding 版本，避免复用旧的 384 维默认集合并触发 Chroma
+# 的 all-MiniLM-L6-v2 provider；新集合只接受项目本地 BGE 向量。
+DEFAULT_COLLECTION_NAME = "knowledge_base_zh_bge_small_zh"
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 DEFAULT_PERSIST_DIRECTORY = ".data/chroma"
 DEFAULT_CORPUS_VERSION = "kb-v1-default"
+BUSINESS_KB_DOMAINS = frozenset({"consult", "order", "after_sales"})
 CHUNK_SIZE = 500
 HNSW_SPACE = "l2"
+
+
+def resolve_embedding_model_name(model_name: str = DEFAULT_EMBEDDING_MODEL) -> str:
+    """只解析已存在的本地模型目录；缺失时失败关闭，绝不回退到远程模型名。"""
+    candidate = os.path.abspath(model_name)
+    if os.path.isdir(candidate):
+        return candidate
+    project_model = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "models", model_name)
+    )
+    if os.path.isdir(project_model):
+        return project_model
+    raise FileNotFoundError(
+        f"本地 embedding 模型不存在: {model_name}; 已检查 {candidate} 和 {project_model}"
+    )
 
 
 def _load_chromadb() -> Any:
@@ -120,8 +137,9 @@ def build_embedding_function(model_name: str = DEFAULT_EMBEDDING_MODEL) -> Any:
     try:
         module = _load_chromadb()
         embedding_functions = module.utils.embedding_functions
+        resolved_model = resolve_embedding_model_name(model_name)
         return embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=model_name,
+            model_name=resolved_model,
             device="cpu",
             normalize_embeddings=True,
         )
@@ -146,7 +164,6 @@ class KnowledgeBase:
     """
 
     COLLECTION_NAME = DEFAULT_COLLECTION_NAME
-    LEGACY_COLLECTION_NAME = LEGACY_COLLECTION_NAME
     EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL
     CHUNK_SIZE = CHUNK_SIZE
 
@@ -185,21 +202,21 @@ class KnowledgeBase:
             collection_name
             or os.getenv("CUSTOMEROPS_KB_COLLECTION", DEFAULT_COLLECTION_NAME)
         ).strip()
-        self._embedding_function = embedding_function or build_embedding_function(
-            self.embedding_model
-        )
+        self._embedding_function = embedding_function or build_embedding_function(self.embedding_model)
         self._use_server = False
         self._client = client or self._connect_client()
-        self._collection = self._client.get_or_create_collection(
-            name=self.collection_name,
-            metadata={
+        collection_kwargs = {
+            "name": self.collection_name,
+            "metadata": {
                 "description": "ShopCare 产品知识库",
                 "embedding_model": self.embedding_model,
                 "hnsw:space": HNSW_SPACE,
             },
-            embedding_function=self._embedding_function,
-        )
-        self._migrate_legacy_if_needed()
+        }
+        # 禁止 Chroma 默认 embedding provider（all-MiniLM）。无论 HTTP 还是本地
+        # collection，写入和查询都显式传入项目 BGE 向量，因此关闭隐式 provider。
+        collection_kwargs["embedding_function"] = None
+        self._collection = self._client.get_or_create_collection(**collection_kwargs)
 
     def _connect_client(self) -> Any:
         """按 HTTP 优先、PersistentClient fallback 的顺序创建 Chroma client。
@@ -251,71 +268,6 @@ class KnowledgeBase:
         except Exception as exc:
             raise RuntimeError(f"Chroma HTTP 与 PersistentClient 均不可用: {exc}") from exc
 
-    def _migrate_legacy_if_needed(self) -> int:
-        """当新 collection 为空时迁移旧 ``knowledge_base`` 的文档。
-
-        Returns:
-            迁移的文档片段数量；无旧数据或新 collection 非空时返回 0。
-        """
-        # Why：评测 collection 必须与产品库物理隔离，不能因空 collection
-        # 触发旧产品数据迁移；legacy 迁移只属于产品 collection 初始化。
-        if self.collection_name != DEFAULT_COLLECTION_NAME:
-            return 0
-
-        count_method = getattr(self._collection, "count", None)
-        if callable(count_method) and count_method() != 0:
-            return 0
-        try:
-            legacy = self._client.get_collection(name=self.LEGACY_COLLECTION_NAME)
-            data = legacy.get(include=["documents", "metadatas"])
-            documents = list(data.get("documents") or [])
-            ids = list(data.get("ids") or [])
-            metadatas = list(data.get("metadatas") or [])
-            if not documents:
-                return 0
-            migrated_ids: List[str] = []
-            migrated_metas: List[Dict[str, Any]] = []
-            for index, content in enumerate(documents):
-                metadata = metadatas[index] if index < len(metadatas) else {}
-                migrated_ids.append(
-                    str(ids[index]) if index < len(ids) and ids[index] else self._runtime_id(
-                        str(metadata.get("title", "legacy")), index, str(content)
-                    )
-                )
-                source_document_id = str(
-                    metadata.get("source_document_id") or "legacy"
-                )
-                migrated_metas.append(
-                    self._metadata_for_chunk(
-                        title=str(metadata.get("title", "")),
-                        source_document_id=source_document_id,
-                        source_chunk_id=str(
-                            metadata.get("source_chunk_id")
-                            or f"{source_document_id}_chunk_{index}"
-                        ),
-                        content=str(content),
-                        chunk_index=int(metadata.get("chunk_index", index)),
-                        total_chunks=int(metadata.get("total_chunks", len(documents))),
-                        corpus_version=str(
-                            metadata.get("corpus_version") or DEFAULT_CORPUS_VERSION
-                        ),
-                    )
-                )
-            self._collection.add(
-                ids=migrated_ids,
-                documents=[str(item) for item in documents],
-                metadatas=migrated_metas,
-            )
-            logger.info(
-                "已将旧知识库迁移到 %s，共 %s 个文档片段",
-                self.collection_name,
-                len(documents),
-            )
-            return len(documents)
-        except Exception as exc:
-            logger.info("未找到可迁移的旧知识库，跳过迁移: %s", exc)
-            return 0
-
     @staticmethod
     def _slugify(title: str) -> str:
         """为缺失来源 ID 的文档生成稳定可读的来源标识。
@@ -353,8 +305,9 @@ class KnowledgeBase:
         chunk_index: int,
         total_chunks: int,
         corpus_version: str,
+        domain: str = "",
     ) -> Dict[str, Any]:
-        """构造严格包含七项字段的 chunk metadata。
+        """构造含业务域与稳定身份的 chunk metadata。
 
         Args:
             title: 原文标题。
@@ -364,9 +317,10 @@ class KnowledgeBase:
             chunk_index: 从 0 开始的 chunk 序号。
             total_chunks: 原文切片总数。
             corpus_version: 语料版本。
+            domain: consult、order 或 after_sales；未分类旧片段使用空字符串。
 
         Returns:
-            含七项必需字段的 metadata 字典。
+            含来源、内容哈希和业务域的 metadata 字典。
         """
         return {
             "title": title,
@@ -376,6 +330,7 @@ class KnowledgeBase:
             "chunk_index": chunk_index,
             "total_chunks": total_chunks,
             "corpus_version": corpus_version,
+            "domain": domain,
         }
 
     @staticmethod
@@ -504,6 +459,12 @@ class KnowledgeBase:
                 continue
             source_document_id = str(document.get("source_document_id") or self._slugify(title))
             corpus_version = str(document.get("corpus_version") or DEFAULT_CORPUS_VERSION)
+            domain = str(document.get("domain") or "").strip()
+            if domain not in BUSINESS_KB_DOMAINS:
+                raise ValueError(
+                    f"知识文档必须标记一个有效业务域 {sorted(BUSINESS_KB_DOMAINS)}: "
+                    f"{source_document_id}"
+                )
             for index, chunk in enumerate(chunks):
                 ids.append(self._runtime_id(title, index, chunk))
                 contents.append(chunk)
@@ -516,10 +477,16 @@ class KnowledgeBase:
                         chunk_index=index,
                         total_chunks=len(chunks),
                         corpus_version=corpus_version,
+                        domain=domain,
                     )
                 )
         if ids:
-            self._collection.add(ids=ids, documents=contents, metadatas=metadatas)
+            # HTTP Chroma 服务端不能复用本地 embedding function；显式传入本地
+            # BGE 向量，避免服务端回退到 all-MiniLM-L6-v2 并触发下载。
+            embeddings = self._embedding_function(contents)
+            upsert = getattr(self._collection, "upsert", None)
+            write = upsert if callable(upsert) else self._collection.add
+            write(ids=ids, documents=contents, metadatas=metadatas, embeddings=embeddings)
             logger.info("知识库写入 %s 个文档片段", len(ids))
         return len(ids)
 
@@ -579,11 +546,22 @@ class KnowledgeBase:
             metadatas.append(clean_metadata)
         if not ids:
             return 0
+        embeddings = self._embedding_function(documents)
         upsert = getattr(self._collection, "upsert", None)
         if callable(upsert):
-            upsert(ids=ids, documents=documents, metadatas=metadatas)
+            upsert(
+                ids=ids,
+                documents=documents,
+                metadatas=metadatas,
+                embeddings=embeddings,
+            )
         else:
-            self._collection.add(ids=ids, documents=documents, metadatas=metadatas)
+            self._collection.add(
+                ids=ids,
+                documents=documents,
+                metadatas=metadatas,
+                embeddings=embeddings,
+            )
         logger.info(
             "评测知识库写入 %s 个稳定文档片段: collection=%s",
             len(ids),
@@ -602,8 +580,7 @@ class KnowledgeBase:
         Args:
             query: 用户检索文本。
             top_k: 最多返回的结果数。
-            domain: 可选业务域过滤。仅在切片带有 ``domain`` 元数据时生效；
-                旧知识库没有该字段时自动回退到全库检索，保持兼容。
+            domain: 可选业务域过滤。指定后只查该域；过滤异常直接失败，不回退全库。
 
         Returns:
             包含 ``title``、``content``、``score``、``id``、``runtime_id`` 和
@@ -612,23 +589,21 @@ class KnowledgeBase:
         bounded_top_k = max(0, int(top_k))
         if bounded_top_k == 0:
             return []
+        query_text = str(query or "")
+        # HttpClient 不会把本地 embedding_function 传给 Chroma 服务端；
+        # 如果使用 query_texts，Chroma 会自动下载默认 all-MiniLM-L6-v2。
+        # 这里强制本地 BGE 生成向量，再传 query_embeddings，避免错误模型和网络下载。
+        query_embedding = self._embedding_function([query_text])
         query_kwargs = {
-            "query_texts": [str(query or "")],
+            "query_embeddings": query_embedding,
             "n_results": bounded_top_k,
             "include": ["documents", "metadatas", "distances"],
         }
-        results = None
         if domain:
-            try:
-                filtered = self._collection.query(**query_kwargs, where={"domain": domain})
-                # If the collection predates domain metadata, Chroma returns no
-                # rows. Keep the domain hint best-effort instead of hiding all
-                # product knowledge from the agent.
-                if self._first_nested(filtered.get("documents")):
-                    results = filtered
-            except Exception:
-                logger.debug("业务域过滤不可用，回退到全库检索: domain=%s", domain, exc_info=True)
-        if results is None:
+            if domain not in BUSINESS_KB_DOMAINS:
+                raise ValueError(f"不支持的知识业务域: {domain}")
+            results = self._collection.query(**query_kwargs, where={"domain": domain})
+        else:
             results = self._collection.query(**query_kwargs)
         documents = self._first_nested(results.get("documents"))
         metadatas = self._first_nested(results.get("metadatas"))
@@ -653,6 +628,7 @@ class KnowledgeBase:
                     "chunk_index": metadata.get("chunk_index", 0),
                     "total_chunks": metadata.get("total_chunks", 0),
                     "corpus_version": str(metadata.get("corpus_version", "")),
+                    "domain": str(metadata.get("domain", "")),
                 }
             )
         return rows

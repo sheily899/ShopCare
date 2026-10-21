@@ -1,0 +1,113 @@
+{
+  "version": "handoff-urgency-v2",
+  "default": {
+    "priority": "P3",
+    "score": 0,
+    "reason": "转人工本身不加分，当前消息未命中其他紧急度规则"
+  },
+  "thresholds": {
+    "p1_min_score": 3,
+    "p2_min_score": 1
+  },
+  "hard_priority": "P0",
+  "hard_score": 999,
+  "async_emotion_threat": {
+    "id": "emotion.threat_escalation",
+    "reason": "模型判断当前消息明确提出对外升级行动"
+  },
+  "handoff_policy": {
+    "explicit_request_phrases": [
+      "转人工",
+      "人工客服",
+      "我要找人工",
+      "找人工",
+      "请人工处理",
+      "联系人工",
+      "人工处理",
+      "人工介入",
+      "升级人工",
+      "请升级处理",
+      "supervisor"
+    ],
+    "negative_request_prefixes": [
+      "不想",
+      "不要",
+      "不需要",
+      "无需",
+      "暂时不",
+      "先不",
+      "不用",
+      "不希望",
+      "不考虑",
+      "不是要",
+      "别"
+    ],
+    "automatic_handoff_priorities": ["P0"],
+    "automatic_handoff_intents": ["suspected_abnormal_refund"],
+    "automatic_handoff_intent_action": "疑似异常退款需要人工核对；当前尚未确认退款异常",
+    "priority_actions": {
+      "P0": "先给安全处理答复并进入人工高优先级处理",
+      "P1": "进入高优先级待处理队列，不因紧急度单独打断当前业务答复",
+      "P2": "继续普通业务流程",
+      "P3": "继续普通业务流程"
+    },
+    "intent_priority_floor": {
+      "adverse_reaction": "P1",
+      "suspected_abnormal_refund": "P1",
+      "complaint": "P2"
+    },
+    "money_alone_auto_handoff": false
+  },
+  "negative_prefixes": ["没有", "没出现", "未出现", "不再", "已无", "目前无", "现在没有", "没有出现", "否认", "不会", "不打算", "没有要", "并非要", "不打", "不是要", "不是想", "不准备", "不想", "不要", "别"],
+  "historical_resolved_patterns": [
+    "(?:之前|以前|上次).{0,12}(?:过敏|发红|红肿|肿胀|呼吸困难|水疱).{0,12}(?:这次没事|目前没事|现在没事|已经恢复|已恢复|已经好了|现在好了)"
+  ],
+  "hard_signals": [
+    {
+      "id": "safety.breathing_or_emergency",
+      "patterns": ["呼吸困难", "喘不过气", "急诊", "急救", "救护车", "嘴唇明显肿胀", "口唇明显肿胀", "眼周明显肿胀", "面部快速肿胀", "脸部快速肿胀", "迅速加重的肿胀", "疑似产品污染", "产品污染", "污染异物"],
+      "reason": "出现需要立即人工关注的严重安全或商品风险"
+    },
+    {
+      "id": "escalation.external_action",
+      "patterns": ["12315", "起诉", "曝光", "举报", "平台介入"],
+      "reason": "明确提出对外升级行动"
+    }
+  ],
+  "scored_signals": [
+    {
+      "id": "safety.adverse_reaction",
+      "score": 3,
+      "patterns": ["过敏", "不良反应", "刺痛", "瘙痒", "皮疹", "发红", "红肿"],
+      "reason": "提及当前不良反应，紧急度至少 P1"
+    },
+    {
+      "id": "time.urgent",
+      "score": 2,
+      "patterns": ["马上", "立刻", "今天", "来不及", "尽快处理"],
+      "reason": "存在明确时间紧迫性"
+    },
+    {
+      "id": "time.soon",
+      "score": 1,
+      "patterns": ["这周", "soon", "快点"],
+      "reason": "消费者希望近期处理"
+    },
+    {
+      "id": "emotion.anger",
+      "score": 2,
+      "emotion": "愤怒",
+      "emotion_question": "anger",
+      "patterns": ["骗子", "骗人", "赖账", "什么垃圾", "踢皮球", "无语"],
+      "reason": "命中强烈愤怒表达"
+    },
+    {
+      "id": "emotion.dissatisfaction",
+      "score": 1,
+      "emotion": "不满",
+      "emotion_question": "dissatisfaction",
+      "patterns": ["一直没", "怎么还", "第三次", "没人理", "太慢"],
+      "reason": "命中不满或处理延迟表达"
+    }
+  ]
+}

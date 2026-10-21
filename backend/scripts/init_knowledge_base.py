@@ -1,6 +1,6 @@
 """ShopCare 产品知识库源文本入库脚本。
 
-本脚本扫描 ``data/knowledge/*.md``，调用当前 KnowledgeBase 重新切片并写入
+本脚本扫描 ``data/knowledge_drafts/*.md``，调用当前 KnowledgeBase 重新切片并写入
 产品 collection。它不导入 benchmark 语料，不复制旧 Chroma 二进制，也不包含
 ToolManager、缓存或 CircuitBreaker 逻辑。
 """
@@ -26,8 +26,9 @@ sys.path.insert(0, ROOT_STRING)
 from mcp.knowledge_base import DEFAULT_COLLECTION_NAME, KnowledgeBase
 
 
-DEFAULT_SOURCE_DIR = ROOT / "data" / "knowledge"
-DEFAULT_CORPUS_VERSION = "shopcare-kb-v1"
+DEFAULT_SOURCE_DIR = ROOT / "data" / "knowledge_drafts"
+DEFAULT_DOMAIN_MAP_PATH = ROOT.parent / "config" / "knowledge_domains.json"
+DEFAULT_CORPUS_VERSION = "shopcare-kb-v2"
 REQUIRED_METADATA_FIELDS = {
     "title",
     "source_document_id",
@@ -36,25 +37,50 @@ REQUIRED_METADATA_FIELDS = {
     "chunk_index",
     "total_chunks",
     "corpus_version",
+    "domain",
 }
 
 
-def load_source_documents(source_dir: Path = DEFAULT_SOURCE_DIR) -> List[Dict[str, Any]]:
+def load_source_documents(
+    source_dir: Path = DEFAULT_SOURCE_DIR,
+    domain_map_path: Path = DEFAULT_DOMAIN_MAP_PATH,
+) -> List[Dict[str, Any]]:
     """读取并规范化产品知识 Markdown 源文档。
 
     Args:
         source_dir: 包含 ``*.md`` 源文档的目录。
+        domain_map_path: source_document_id 到三类业务域的唯一映射配置。
 
     Returns:
         按文件名排序的文档字典列表，每项包含标题、正文、稳定来源 ID 和语料版本。
 
     Raises:
         FileNotFoundError: 源目录不存在或没有 Markdown 文件时抛出。
-        ValueError: 文档缺少标题或正文时抛出。
+        ValueError: 文档缺少标题、正文或业务域映射时抛出。
     """
     files = sorted(source_dir.glob("*.md"))
     if not files:
         raise FileNotFoundError(f"知识源目录没有 Markdown 文档: {source_dir}")
+    domain_config = json.loads(domain_map_path.read_text(encoding="utf-8"))
+    document_domains = domain_config.get("document_domains")
+    if not isinstance(document_domains, dict):
+        raise ValueError(f"知识业务域配置缺少 document_domains: {domain_map_path}")
+    source_ids = {path.stem for path in files}
+    mapped_ids = set(document_domains)
+    missing = sorted(source_ids - mapped_ids)
+    unknown = sorted(mapped_ids - source_ids)
+    if missing or unknown:
+        raise ValueError(
+            f"知识业务域映射必须与源文件一一对应: 缺失={missing}, 多余={unknown}"
+        )
+    valid_domains = {"consult", "order", "after_sales"}
+    invalid = {
+        source_id: domain
+        for source_id, domain in document_domains.items()
+        if domain not in valid_domains
+    }
+    if invalid:
+        raise ValueError(f"知识业务域配置包含无效领域: {invalid}")
     documents: List[Dict[str, Any]] = []
     for path in files:
         text = path.read_text(encoding="utf-8").strip()
@@ -69,6 +95,7 @@ def load_source_documents(source_dir: Path = DEFAULT_SOURCE_DIR) -> List[Dict[st
                 "title": title,
                 "content": body,
                 "source_document_id": path.stem,
+                "domain": document_domains[path.stem],
                 "corpus_version": os.getenv("CUSTOMEROPS_CORPUS_VERSION", DEFAULT_CORPUS_VERSION),
                 "source_path": str(path),
             }
@@ -77,7 +104,7 @@ def load_source_documents(source_dir: Path = DEFAULT_SOURCE_DIR) -> List[Dict[st
 
 
 def validate_chunks(kb: KnowledgeBase, documents: Sequence[Dict[str, Any]]) -> int:
-    """在写入前验证切片长度和七项 metadata 契约。
+    """在写入前验证切片长度和含业务域的 metadata 契约。
 
     Args:
         kb: 当前 KnowledgeBase 实例，用于复用同一切片规则。
@@ -109,6 +136,7 @@ def validate_chunks(kb: KnowledgeBase, documents: Sequence[Dict[str, Any]]) -> i
                 chunk_index=index,
                 total_chunks=len(chunks),
                 corpus_version=str(document["corpus_version"]),
+                domain=str(document["domain"]),
             )
             if set(metadata) != REQUIRED_METADATA_FIELDS:
                 raise ValueError(f"切片 metadata 字段不完整: {metadata}")

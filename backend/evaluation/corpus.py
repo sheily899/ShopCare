@@ -149,12 +149,17 @@ def stable_chunk_metadata(chunk: Mapping[str, Any]) -> Dict[str, Any]:
     return metadata
 
 
-def upsert_stable_chunks(collection: Any, chunks: Sequence[Mapping[str, Any]]) -> int:
+def upsert_stable_chunks(
+    collection: Any,
+    chunks: Sequence[Mapping[str, Any]],
+    embedding_function: Any,
+) -> int:
     """直接 upsert 评测切片，确保不会复用产品切片器。
 
     Args:
         collection: 支持 ``upsert`` 或 ``add`` 的 Chroma collection 替身/实例。
         chunks: 稳定评测切片列表。
+        embedding_function: 项目显式配置的本地 embedding 函数；不允许依赖 Chroma 默认值。
 
     Returns:
         写入数量。
@@ -170,7 +175,14 @@ def upsert_stable_chunks(collection: Any, chunks: Sequence[Mapping[str, Any]]) -
         writer = getattr(collection, "add", None)
     if not callable(writer):
         raise TypeError("评测 collection 缺少 upsert/add 方法")
-    writer(ids=ids, documents=documents, metadatas=metadatas)
+    if not callable(embedding_function):
+        raise TypeError("评测 collection 写入必须提供显式本地 embedding 函数")
+    writer(
+        ids=ids,
+        documents=documents,
+        metadatas=metadatas,
+        embeddings=embedding_function(documents),
+    )
     return len(ids)
 
 
